@@ -16,8 +16,15 @@ export interface Env {
 export interface GitHubUser {
   id: number;
   login: string;
+  email: string | null;
+  name: string | null;
+}
+
+export interface GitHubEmail {
   email: string;
-  name: string;
+  verified: boolean;
+  primary: boolean;
+  visibility: string | null;
 }
 
 export interface SessionData {
@@ -65,17 +72,21 @@ export class GitHubOAuth {
         client_id: this.clientId,
         client_secret: this.clientSecret,
         code,
+        redirect_uri: this.redirectUri,
       }),
     });
 
     if (!response.ok) {
+      const errorText = await response.text();
+      console.error('GitHub token exchange failed:', response.status, errorText);
       throw new Error(`Failed to get access token: ${response.statusText}`);
     }
 
-    const data = await response.json() as { access_token?: string; error?: string };
+    const data = await response.json() as { access_token?: string; error?: string; error_description?: string };
 
     if (data.error || !data.access_token) {
-      throw new Error(`OAuth error: ${data.error || 'No access token'}`);
+      console.error('GitHub OAuth error:', data.error, data.error_description);
+      throw new Error(`OAuth error: ${data.error || 'No access token'} - ${data.error_description || ''}`);
     }
 
     return data.access_token;
@@ -85,18 +96,52 @@ export class GitHubOAuth {
    * Get user info from GitHub
    */
   async getUserInfo(accessToken: string): Promise<GitHubUser> {
-    const response = await fetch('https://api.github.com/user', {
+    // Get user profile
+    const userResponse = await fetch('https://api.github.com/user', {
       headers: {
         'Authorization': `Bearer ${accessToken}`,
-        'Accept': 'application/vnd.github.v3+json',
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
       },
     });
 
-    if (!response.ok) {
-      throw new Error(`Failed to get user info: ${response.statusText}`);
+    if (!userResponse.ok) {
+      const errorText = await userResponse.text();
+      console.error('GitHub user info failed:', userResponse.status, errorText);
+      throw new Error(`Failed to get user info: ${userResponse.statusText}. This usually means the OAuth token is invalid or missing required scopes.`);
     }
 
-    return await response.json() as GitHubUser;
+    const user = await userResponse.json() as GitHubUser;
+
+    // If email is null or empty, fetch from emails endpoint
+    if (!user.email) {
+      try {
+        const emailsResponse = await fetch('https://api.github.com/user/emails', {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+        });
+
+        if (emailsResponse.ok) {
+          const emails = await emailsResponse.json() as GitHubEmail[];
+          // Find primary email, or first verified email, or first email
+          const primaryEmail = emails.find(e => e.primary && e.verified);
+          const verifiedEmail = emails.find(e => e.verified);
+          const firstEmail = emails[0];
+
+          user.email = primaryEmail?.email || verifiedEmail?.email || firstEmail?.email || null;
+        } else {
+          console.warn('Failed to fetch user emails:', emailsResponse.status);
+        }
+      } catch (error) {
+        console.warn('Error fetching user emails:', error);
+        // Continue without email rather than failing completely
+      }
+    }
+
+    return user;
   }
 }
 

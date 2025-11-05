@@ -11,6 +11,7 @@ export interface OAuth2Metadata {
   issuer: string;
   authorization_endpoint: string;
   token_endpoint: string;
+  registration_endpoint: string;
   scopes_supported: string[];
   response_types_supported: string[];
   grant_types_supported: string[];
@@ -36,14 +37,45 @@ export interface OAuth2TokenResponse {
 }
 
 /**
+ * RFC 7591 Client Registration Request
+ */
+export interface ClientRegistrationRequest {
+  client_name?: string;
+  client_uri?: string;
+  redirect_uris?: string[];
+  grant_types?: string[];
+  response_types?: string[];
+  scope?: string;
+  token_endpoint_auth_method?: string;
+  [key: string]: any; // Allow additional metadata
+}
+
+/**
+ * RFC 7591 Client Registration Response
+ */
+export interface ClientRegistrationResponse {
+  client_id: string;
+  client_id_issued_at?: number;
+  client_name?: string;
+  client_uri?: string;
+  redirect_uris?: string[];
+  grant_types?: string[];
+  response_types?: string[];
+  scope?: string;
+  token_endpoint_auth_method?: string;
+}
+
+/**
  * Generate OAuth 2.0 Authorization Server Metadata
  * Required by RFC 8414 for MCP clients
+ * Includes RFC 7591 Dynamic Client Registration support
  */
 export function generateOAuthMetadata(baseUrl: string): OAuth2Metadata {
   return {
     issuer: baseUrl,
     authorization_endpoint: `${baseUrl}/oauth/authorize`,
     token_endpoint: `${baseUrl}/oauth/token`,
+    registration_endpoint: `${baseUrl}/oauth/register`,
     scopes_supported: ['mcp'],
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
@@ -203,5 +235,67 @@ export class MCPOAuthManager {
       userId: tokenData.userId,
       clientId: tokenData.clientId,
     };
+  }
+
+  /**
+   * Register a new OAuth client (RFC 7591)
+   */
+  async registerClient(request: ClientRegistrationRequest): Promise<ClientRegistrationResponse> {
+    // Generate a unique client ID
+    const clientId = crypto.randomUUID();
+    const issuedAt = Math.floor(Date.now() / 1000);
+
+    // Set defaults for missing fields
+    const grantTypes = request.grant_types || ['authorization_code', 'refresh_token'];
+    const responseTypes = request.response_types || ['code'];
+    const tokenEndpointAuthMethod = request.token_endpoint_auth_method || 'none';
+    const scope = request.scope || 'mcp';
+
+    // Store client registration
+    const clientData = {
+      client_id: clientId,
+      client_id_issued_at: issuedAt,
+      client_name: request.client_name,
+      client_uri: request.client_uri,
+      redirect_uris: request.redirect_uris,
+      grant_types: grantTypes,
+      response_types: responseTypes,
+      scope: scope,
+      token_endpoint_auth_method: tokenEndpointAuthMethod,
+    };
+
+    const key = `oauth:client:${clientId}`;
+    await this.env.OAUTH_KV.put(
+      key,
+      JSON.stringify(clientData),
+      { expirationTtl: 60 * 60 * 24 * 365 } // 1 year
+    );
+
+    // Return registration response
+    return {
+      client_id: clientId,
+      client_id_issued_at: issuedAt,
+      client_name: request.client_name,
+      client_uri: request.client_uri,
+      redirect_uris: request.redirect_uris,
+      grant_types: grantTypes,
+      response_types: responseTypes,
+      scope: scope,
+      token_endpoint_auth_method: tokenEndpointAuthMethod,
+    };
+  }
+
+  /**
+   * Get registered client information
+   */
+  async getClient(clientId: string): Promise<ClientRegistrationResponse | null> {
+    const key = `oauth:client:${clientId}`;
+    const data = await this.env.OAUTH_KV.get(key);
+
+    if (!data) {
+      return null;
+    }
+
+    return JSON.parse(data);
   }
 }

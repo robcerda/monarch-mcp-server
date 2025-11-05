@@ -24,6 +24,7 @@ import {
   MCPOAuthManager,
   type OAuth2TokenRequest,
   type OAuth2TokenResponse,
+  type ClientRegistrationRequest,
 } from './oauth-mcp.js';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -227,6 +228,26 @@ app.post('/oauth/token', async (c) => {
   } catch (error) {
     console.error('Token endpoint error:', error);
     return c.json({ error: 'server_error' }, 500);
+  }
+});
+
+// OAuth Client Registration Endpoint (RFC 7591) - For MCP clients
+app.post('/oauth/register', async (c) => {
+  try {
+    const body = await c.req.json<ClientRegistrationRequest>();
+
+    // Validate request
+    if (!body) {
+      return c.json({ error: 'invalid_request', error_description: 'Request body is required' }, 400);
+    }
+
+    const mcpOAuth = new MCPOAuthManager(c.env);
+    const registration = await mcpOAuth.registerClient(body);
+
+    return c.json(registration, 201);
+  } catch (error) {
+    console.error('Client registration error:', error);
+    return c.json({ error: 'server_error', error_description: 'Failed to register client' }, 500);
   }
 });
 

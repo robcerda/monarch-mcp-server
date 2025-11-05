@@ -18,11 +18,11 @@
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "OAUTH_KV_ID_PLACEHOLDER"
+      "id": "078401bba6b6426d9b1897fb339f4dc1"
     },
     {
       "binding": "MONARCH_KV",
-      "id": "MONARCH_KV_ID_PLACEHOLDER"
+      "id": "15b8a56ff9704c178066d5dad222ca0c"
     }
   ]
 }

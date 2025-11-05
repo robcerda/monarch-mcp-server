@@ -1,0 +1,11 @@
+# GitHub OAuth - Development
+GITHUB_CLIENT_ID=your-dev-client-id
+GITHUB_CLIENT_SECRET=your-dev-client-secret
+
+# Cookie Encryption
+COOKIE_ENCRYPTION_KEY=your-encryption-key-from-openssl-rand
+
+# Monarch Money (Optional - for initial setup)
+# These are only needed for the token refresh UI
+MONARCH_EMAIL=your-monarch-email@example.com
+MONARCH_PASSWORD=your-monarch-password

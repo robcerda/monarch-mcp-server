@@ -99,8 +99,13 @@ temp/
 !.dev.vars.example
 wrangler.toml
 .wrangler/
-worker/
 .mf/
+
+# Worker build artifacts and dependencies
+worker/node_modules/
+worker/.wrangler/
+worker/dist/
+worker/.mf/
 
 # Cloudflare Secrets (if accidentally exported)
 secrets.txt

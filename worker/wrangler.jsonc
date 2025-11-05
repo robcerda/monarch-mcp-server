@@ -1,0 +1,44 @@
+{
+  "name": "monarch-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-03-10",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  },
+
+  "vars": {
+    "ENVIRONMENT": "production",
+    "MCP_SERVER_NAME": "Monarch Money MCP",
+    "MCP_SERVER_VERSION": "0.1.0"
+  },
+
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": ""
+    },
+    {
+      "binding": "MONARCH_KV",
+      "id": ""
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP_OBJECT",
+        "class_name": "MonarchMCP"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["MonarchMCP"]
+    }
+  ]
+}

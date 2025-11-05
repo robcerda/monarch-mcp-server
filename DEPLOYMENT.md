@@ -216,18 +216,61 @@ Add this configuration to your Claude Desktop config file:
 
 Once connected, you'll have access to these tools in Claude Desktop:
 
+### **Authentication & Setup Tools**
+
 | Tool | Description |
 |------|-------------|
-| `setup_authentication` | Get setup instructions |
-| `check_auth_status` | Check authentication status |
+| `setup_wizard` | **⭐ Recommended** - Guided setup with magic link for easy authentication |
+| `check_status` | Comprehensive authentication health check with token expiry info |
+| `setup_authentication` | Manual setup instructions (legacy) |
+| `check_auth_status` | Basic token status check (legacy) |
+
+### **Financial Data Tools**
+
+| Tool | Description |
+|------|-------------|
 | `get_accounts` | Get all financial accounts |
-| `get_transactions` | Get transactions with filters |
+| `get_transactions` | Get transactions with filters (limit, date range, account) |
 | `get_budgets` | Get budget information |
-| `get_cashflow` | Get cashflow analysis |
-| `get_account_holdings` | Get investment holdings |
+| `get_cashflow` | Get cashflow analysis by date range |
+| `get_account_holdings` | Get investment holdings for an account |
 | `create_transaction` | Create new transaction |
 | `update_transaction` | Update existing transaction |
-| `refresh_accounts` | Request account data refresh |
+| `refresh_accounts` | Request account data refresh from institutions |
+
+**Pro Tip:** Use `setup_wizard` for first-time setup and whenever your token expires. It generates a magic link that makes authentication super easy!
+
+---
+
+## 👤 **User Experience Flow**
+
+### **First-Time Setup from Claude/ChatGPT**
+
+When you first try to use a financial tool:
+
+1. **Tool returns authentication error** with setup instructions
+2. **You ask:** "Use the setup_wizard tool"
+3. **Claude generates a magic link** like: `https://monarch-mcp.tm3.workers.dev/auth/magic/AB3CD5FG`
+4. **You click/copy the link** and open in your browser
+5. **Browser shows token form** (already authenticated via magic link)
+6. **You enter:** Monarch Money email, password, and 2FA code
+7. **Token saved!** You return to Claude and retry your command
+8. **Success!** Your financial data is retrieved
+
+### **When Token Expires (90 days later)**
+
+1. **Tool returns expiry error** with refresh instructions
+2. **You run:** `setup_wizard` again
+3. **Follow same flow** to refresh your token
+4. **Back to normal!**
+
+### **Proactive Monitoring**
+
+- Run `check_status` anytime to see token health
+- Get warnings when token expires in < 30 days
+- Set calendar reminders for day 80
+
+**📖 For detailed user flow documentation, see:** [USER-FLOW-GUIDE.md](USER-FLOW-GUIDE.md)
 
 ---
 

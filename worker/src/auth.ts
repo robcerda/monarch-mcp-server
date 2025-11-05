@@ -41,7 +41,8 @@ export class GitHubOAuth {
   constructor(
     private clientId: string,
     private clientSecret: string,
-    private redirectUri: string
+    private redirectUri: string,
+    private userAgent: string = 'monarch-mcp-worker/1.0'
   ) {}
 
   /**
@@ -67,6 +68,7 @@ export class GitHubOAuth {
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
+        'User-Agent': this.userAgent,
       },
       body: JSON.stringify({
         client_id: this.clientId,
@@ -102,6 +104,7 @@ export class GitHubOAuth {
         'Authorization': `Bearer ${accessToken}`,
         'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': this.userAgent,
       },
     });
 
@@ -121,6 +124,7 @@ export class GitHubOAuth {
             'Authorization': `Bearer ${accessToken}`,
             'Accept': 'application/vnd.github+json',
             'X-GitHub-Api-Version': '2022-11-28',
+            'User-Agent': this.userAgent,
           },
         });
 

@@ -44,12 +44,15 @@ export class AuthHealthManager {
 
     if (token && tokenMeta) {
       const meta = JSON.parse(tokenMeta);
-      tokenExpiry = meta.expiresAt;
+      const expiresAtRaw = typeof meta.expiresAt === 'string' ? meta.expiresAt : undefined;
 
-      // Check if token is expired
-      const expiryDate = new Date(tokenExpiry);
-      const now = new Date();
-      hasValidToken = expiryDate > now;
+      if (expiresAtRaw) {
+        const expiryDate = new Date(expiresAtRaw);
+        if (!Number.isNaN(expiryDate.getTime())) {
+          tokenExpiry = expiresAtRaw;
+          hasValidToken = expiryDate > new Date();
+        }
+      }
     }
 
     // Determine what action is needed
@@ -112,7 +115,11 @@ export class AuthHealthManager {
     if (!tokenMeta) return null;
 
     const meta = JSON.parse(tokenMeta);
-    const expiryDate = new Date(meta.expiresAt);
+    const expiresAtRaw = typeof meta.expiresAt === 'string' ? meta.expiresAt : undefined;
+    if (!expiresAtRaw) return null;
+
+    const expiryDate = new Date(expiresAtRaw);
+    if (Number.isNaN(expiryDate.getTime())) return null;
     const now = new Date();
     const diffTime = expiryDate.getTime() - now.getTime();
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));

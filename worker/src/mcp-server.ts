@@ -3,7 +3,6 @@
  * Implements all MCP tools using Cloudflare Agents SDK
  */
 
-import { McpAgent } from 'agents/mcp';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { MonarchMoney } from './monarch-client.js';
@@ -16,15 +15,13 @@ import {
   generateStatusReport,
 } from './auth-flow.js';
 
-export class MonarchMCP extends McpAgent {
+export class MonarchMCP {
   server = new McpServer({
     name: 'Monarch Money MCP',
     version: '0.1.0',
   });
 
-  constructor(private env: Env, private userId: string) {
-    super();
-  }
+  constructor(private env: Env, private userId: string) {}
 
   /**
    * Get authenticated Monarch Money client

@@ -532,7 +532,7 @@ app.get('/auth/magic/:code', async (c) => {
   }
 
   try {
-    const magicLinkManager = new MagicLinkManager(c.env.OAUTH_KV);
+    const magicLinkManager = new MagicLinkManager(c.env);
     const userId = await magicLinkManager.validateMagicLink(code);
 
     if (!userId) {

@@ -99,11 +99,25 @@ function extractErrorMessage(data: unknown, fallbackText: string | null, status:
   return { message, code };
 }
 
-async function authenticate(payload: Record<string, unknown>): Promise<string> {
+interface AuthParams {
+  email: string;
+  password: string;
+  totp?: string;
+}
+
+async function authenticate(params: AuthParams): Promise<string> {
+  const body = {
+    username: params.email,
+    password: params.password,
+    supports_mfa: true,
+    trusted_device: false,
+    ...(params.totp ? { totp: params.totp } : {}),
+  };
+
   const response = await fetch('https://api.monarchmoney.com/auth/login/', {
     method: 'POST',
     headers: BASE_HEADERS,
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
 
   const rawText = await response.text();
@@ -117,8 +131,13 @@ async function authenticate(payload: Record<string, unknown>): Promise<string> {
   }
 
   if (!response.ok) {
-    const { message, code } = extractErrorMessage(data, typeof data === 'string' ? data : rawText, response.status);
-    throw new MonarchAuthError(message, code, response.status, data);
+    const parsed = extractErrorMessage(data, typeof data === 'string' ? data : rawText, response.status);
+    const inferredCode =
+      response.status === 403 && !params.totp
+        ? 'MFA_REQUIRED'
+        : parsed.code;
+
+    throw new MonarchAuthError(parsed.message, inferredCode, response.status, data);
   }
 
   if (!data || typeof data !== 'object' || typeof data.token !== 'string') {
@@ -155,7 +174,7 @@ export class MonarchMoney {
     const token = await authenticate({
       email,
       password,
-      totp_code: mfaCode,
+      totp: mfaCode,
     });
     return new MonarchMoney(token);
   }

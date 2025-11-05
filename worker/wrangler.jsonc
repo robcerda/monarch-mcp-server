@@ -18,27 +18,11 @@
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": ""
+      "id": "OAUTH_KV_ID_PLACEHOLDER"
     },
     {
       "binding": "MONARCH_KV",
-      "id": ""
-    }
-  ],
-
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "MCP_OBJECT",
-        "class_name": "MonarchMCP"
-      }
-    ]
-  },
-
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_classes": ["MonarchMCP"]
+      "id": "MONARCH_KV_ID_PLACEHOLDER"
     }
   ]
 }

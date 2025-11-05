@@ -12,7 +12,29 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
   <img width="380" height="200" src="https://glama.ai/mcp/servers/@robcerda/monarch-mcp-server/badge" alt="monarch-mcp-server MCP server" />
 </a>
 
-## 🚀 Quick Start
+## 🌐 Deployment Options
+
+This MCP server supports **two deployment modes**:
+
+### 🏠 Local Deployment (Python)
+Run the MCP server locally on your machine. Best for personal use and development.
+- ✅ Simple setup
+- ✅ No cloud dependencies
+- ✅ Full control over data
+- 📍 See instructions below
+
+### ☁️ Remote Deployment (Cloudflare Workers)
+Deploy as a remote MCP server on Cloudflare's global network. Best for production use.
+- ✅ Access from anywhere
+- ✅ No local process needed
+- ✅ Built-in OAuth authentication
+- ✅ Secure token storage in KV
+- ✅ Global edge deployment
+- 📍 [See DEPLOYMENT.md](DEPLOYMENT.md)
+
+---
+
+## 🚀 Local Deployment - Quick Start
 
 ### 1. Installation
 

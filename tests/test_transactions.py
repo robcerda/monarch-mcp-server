@@ -16,6 +16,10 @@ from monarch_mcp_server.server import (
     update_transaction_notes,
     mark_transaction_reviewed,
     bulk_categorize_transactions,
+    search_transactions,
+    get_transaction_details,
+    delete_transaction,
+    get_recurring_transactions,
 )
 
 
@@ -422,3 +426,245 @@ class TestBulkCategorizeTransactions:
         )
 
         assert "Error in bulk categorization" in result
+
+
+class TestSearchTransactions:
+    """Tests for search_transactions tool."""
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_search_with_text(self, mock_get_client):
+        """Test text search."""
+        mock_client = AsyncMock()
+        mock_client.get_transactions.return_value = {
+            "allTransactions": {
+                "results": [
+                    {
+                        "id": "txn_1",
+                        "date": "2024-01-15",
+                        "amount": -50.00,
+                        "merchant": {"name": "Amazon"},
+                        "category": {"id": "cat_1", "name": "Shopping"},
+                        "account": {"id": "acc_1", "displayName": "Checking"},
+                        "needsReview": False,
+                        "tags": [],
+                    }
+                ]
+            }
+        }
+        mock_get_client.return_value = mock_client
+
+        result = search_transactions(search="Amazon")
+
+        call_kwargs = mock_client.get_transactions.call_args.kwargs
+        assert call_kwargs["search"] == "Amazon"
+
+        transactions = json.loads(result)
+        assert len(transactions) == 1
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_search_with_multiple_filters(self, mock_get_client):
+        """Test search with multiple filters."""
+        mock_client = AsyncMock()
+        mock_client.get_transactions.return_value = {
+            "allTransactions": {"results": []}
+        }
+        mock_get_client.return_value = mock_client
+
+        search_transactions(
+            search="coffee",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+            category_ids=["cat_1"],
+            account_ids=["acc_1"],
+            has_notes=False,
+            is_recurring=True
+        )
+
+        call_kwargs = mock_client.get_transactions.call_args.kwargs
+        assert call_kwargs["search"] == "coffee"
+        assert call_kwargs["start_date"] == "2024-01-01"
+        assert call_kwargs["end_date"] == "2024-01-31"
+        assert call_kwargs["category_ids"] == ["cat_1"]
+        assert call_kwargs["account_ids"] == ["acc_1"]
+        assert call_kwargs["has_notes"] is False
+        assert call_kwargs["is_recurring"] is True
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_search_returns_full_details(self, mock_get_client):
+        """Test that search returns full transaction details."""
+        mock_client = AsyncMock()
+        mock_client.get_transactions.return_value = {
+            "allTransactions": {
+                "results": [
+                    {
+                        "id": "txn_1",
+                        "date": "2024-01-15",
+                        "amount": -50.00,
+                        "merchant": {"name": "Amazon"},
+                        "plaidName": "AMAZON.COM*1234",
+                        "category": {"id": "cat_1", "name": "Shopping"},
+                        "account": {"id": "acc_1", "displayName": "Checking"},
+                        "notes": "Gift",
+                        "needsReview": True,
+                        "pending": False,
+                        "hideFromReports": False,
+                        "isSplitTransaction": False,
+                        "isRecurring": False,
+                        "attachments": [{"id": "att_1"}],
+                        "tags": [{"id": "tag_1", "name": "Personal"}],
+                    }
+                ]
+            }
+        }
+        mock_get_client.return_value = mock_client
+
+        result = search_transactions()
+
+        transactions = json.loads(result)
+        txn = transactions[0]
+        assert txn["has_attachments"] is True
+        assert txn["is_split"] is False
+        assert txn["is_recurring"] is False
+        assert len(txn["tags"]) == 1
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_search_error(self, mock_get_client):
+        """Test error handling."""
+        mock_get_client.side_effect = RuntimeError("API error")
+
+        result = search_transactions(search="test")
+
+        assert "Error searching transactions" in result
+
+
+class TestGetTransactionDetails:
+    """Tests for get_transaction_details tool."""
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_get_details_success(self, mock_get_client):
+        """Test successful retrieval of transaction details."""
+        mock_client = AsyncMock()
+        mock_client.get_transaction_details.return_value = {
+            "getTransaction": {
+                "id": "txn_123",
+                "amount": -100.00,
+                "date": "2024-01-15",
+                "category": {"id": "cat_1", "name": "Shopping"},
+                "attachments": [{"id": "att_1", "filename": "receipt.pdf"}],
+                "splits": [],
+            }
+        }
+        mock_get_client.return_value = mock_client
+
+        result = get_transaction_details(transaction_id="txn_123")
+
+        mock_client.get_transaction_details.assert_called_once_with(
+            transaction_id="txn_123"
+        )
+
+        data = json.loads(result)
+        assert "getTransaction" in data
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_get_details_error(self, mock_get_client):
+        """Test error handling."""
+        mock_get_client.side_effect = RuntimeError("Transaction not found")
+
+        result = get_transaction_details("txn_invalid")
+
+        assert "Error getting transaction details" in result
+
+
+class TestDeleteTransaction:
+    """Tests for delete_transaction tool."""
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_delete_success(self, mock_get_client):
+        """Test successful transaction deletion."""
+        mock_client = AsyncMock()
+        mock_client.delete_transaction.return_value = {
+            "deleteTransaction": {"deleted": True}
+        }
+        mock_get_client.return_value = mock_client
+
+        result = delete_transaction(transaction_id="txn_123")
+
+        mock_client.delete_transaction.assert_called_once_with(
+            transaction_id="txn_123"
+        )
+
+        data = json.loads(result)
+        assert data["deleteTransaction"]["deleted"] is True
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_delete_error(self, mock_get_client):
+        """Test error handling."""
+        mock_get_client.side_effect = RuntimeError("Cannot delete")
+
+        result = delete_transaction("txn_123")
+
+        assert "Error deleting transaction" in result
+
+
+class TestGetRecurringTransactions:
+    """Tests for get_recurring_transactions tool."""
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_get_recurring_success(self, mock_get_client):
+        """Test successful retrieval of recurring transactions."""
+        mock_client = AsyncMock()
+        mock_client.get_recurring_transactions.return_value = {
+            "recurringTransactionItems": [
+                {
+                    "date": "2024-02-01",
+                    "amount": -15.99,
+                    "isPast": False,
+                    "transactionId": None,
+                    "stream": {
+                        "id": "stream_1",
+                        "frequency": "monthly",
+                        "amount": -15.99,
+                        "isApproximate": False,
+                        "merchant": {"name": "Netflix"},
+                    },
+                    "category": {"name": "Entertainment"},
+                    "account": {"displayName": "Credit Card"},
+                }
+            ]
+        }
+        mock_get_client.return_value = mock_client
+
+        result = get_recurring_transactions()
+
+        recurring = json.loads(result)
+        assert len(recurring) == 1
+        assert recurring[0]["amount"] == -15.99
+        assert recurring[0]["stream"]["merchant"] == "Netflix"
+        assert recurring[0]["stream"]["frequency"] == "monthly"
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_get_recurring_with_dates(self, mock_get_client):
+        """Test with custom date range."""
+        mock_client = AsyncMock()
+        mock_client.get_recurring_transactions.return_value = {
+            "recurringTransactionItems": []
+        }
+        mock_get_client.return_value = mock_client
+
+        get_recurring_transactions(
+            start_date="2024-02-01",
+            end_date="2024-02-29"
+        )
+
+        call_kwargs = mock_client.get_recurring_transactions.call_args.kwargs
+        assert call_kwargs["start_date"] == "2024-02-01"
+        assert call_kwargs["end_date"] == "2024-02-29"
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_get_recurring_error(self, mock_get_client):
+        """Test error handling."""
+        mock_get_client.side_effect = RuntimeError("API error")
+
+        result = get_recurring_transactions()
+
+        assert "Error getting recurring transactions" in result

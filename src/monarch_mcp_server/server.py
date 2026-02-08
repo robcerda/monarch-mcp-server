@@ -1011,6 +1011,230 @@ def create_tag(
 
 
 @mcp.tool()
+def search_transactions(
+    search: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    category_ids: Optional[List[str]] = None,
+    account_ids: Optional[List[str]] = None,
+    tag_ids: Optional[List[str]] = None,
+    has_attachments: Optional[bool] = None,
+    has_notes: Optional[bool] = None,
+    hidden_from_reports: Optional[bool] = None,
+    is_split: Optional[bool] = None,
+    is_recurring: Optional[bool] = None,
+) -> str:
+    """
+    Search and filter transactions with comprehensive filtering options.
+
+    This is the most flexible transaction query tool, supporting all available filters.
+
+    Args:
+        search: Text to search for in transaction descriptions/merchants
+        limit: Maximum number of transactions to return (default: 100)
+        offset: Number of transactions to skip for pagination (default: 0)
+        start_date: Filter start date in YYYY-MM-DD format
+        end_date: Filter end date in YYYY-MM-DD format
+        category_ids: List of category IDs to filter by
+        account_ids: List of account IDs to filter by
+        tag_ids: List of tag IDs to filter by
+        has_attachments: Filter for transactions with/without attachments
+        has_notes: Filter for transactions with/without notes
+        hidden_from_reports: Filter for transactions hidden/shown in reports
+        is_split: Filter for split/non-split transactions
+        is_recurring: Filter for recurring/non-recurring transactions
+
+    Returns:
+        List of matching transactions with full details.
+    """
+    try:
+
+        async def _search_transactions():
+            client = await get_monarch_client()
+
+            # Build filters dict with only non-None values
+            filters = {"limit": limit, "offset": offset}
+
+            if search:
+                filters["search"] = search
+            if start_date:
+                filters["start_date"] = start_date
+            if end_date:
+                filters["end_date"] = end_date
+            if category_ids:
+                filters["category_ids"] = category_ids
+            if account_ids:
+                filters["account_ids"] = account_ids
+            if tag_ids:
+                filters["tag_ids"] = tag_ids
+            if has_attachments is not None:
+                filters["has_attachments"] = has_attachments
+            if has_notes is not None:
+                filters["has_notes"] = has_notes
+            if hidden_from_reports is not None:
+                filters["hidden_from_reports"] = hidden_from_reports
+            if is_split is not None:
+                filters["is_split"] = is_split
+            if is_recurring is not None:
+                filters["is_recurring"] = is_recurring
+
+            return await client.get_transactions(**filters)
+
+        transactions_data = run_async(_search_transactions())
+
+        # Format transactions with full details
+        transaction_list = []
+        for txn in transactions_data.get("allTransactions", {}).get("results", []):
+            transaction_info = {
+                "id": txn.get("id"),
+                "date": txn.get("date"),
+                "amount": txn.get("amount"),
+                "merchant": txn.get("merchant", {}).get("name") if txn.get("merchant") else None,
+                "original_name": txn.get("plaidName") or txn.get("originalName"),
+                "category": txn.get("category", {}).get("name") if txn.get("category") else None,
+                "category_id": txn.get("category", {}).get("id") if txn.get("category") else None,
+                "account": txn.get("account", {}).get("displayName") if txn.get("account") else None,
+                "account_id": txn.get("account", {}).get("id") if txn.get("account") else None,
+                "notes": txn.get("notes"),
+                "needs_review": txn.get("needsReview", False),
+                "is_pending": txn.get("pending", False),
+                "hide_from_reports": txn.get("hideFromReports", False),
+                "is_split": txn.get("isSplitTransaction", False),
+                "is_recurring": txn.get("isRecurring", False),
+                "has_attachments": bool(txn.get("attachments")),
+                "tags": [
+                    {"id": tag.get("id"), "name": tag.get("name")}
+                    for tag in txn.get("tags", [])
+                ] if txn.get("tags") else [],
+            }
+            transaction_list.append(transaction_info)
+
+        return json.dumps(transaction_list, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to search transactions: {e}")
+        return f"Error searching transactions: {str(e)}"
+
+
+@mcp.tool()
+def get_transaction_details(
+    transaction_id: str,
+) -> str:
+    """
+    Get full details for a specific transaction.
+
+    Returns comprehensive information including attachments, splits, tags, and more.
+
+    Args:
+        transaction_id: The ID of the transaction to get details for
+
+    Returns:
+        Complete transaction details.
+    """
+    try:
+
+        async def _get_details():
+            client = await get_monarch_client()
+            return await client.get_transaction_details(transaction_id=transaction_id)
+
+        result = run_async(_get_details())
+
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get transaction details: {e}")
+        return f"Error getting transaction details: {str(e)}"
+
+
+@mcp.tool()
+def delete_transaction(
+    transaction_id: str,
+) -> str:
+    """
+    Delete a transaction from Monarch Money.
+
+    Warning: This action cannot be undone.
+
+    Args:
+        transaction_id: The ID of the transaction to delete
+
+    Returns:
+        Confirmation of deletion.
+    """
+    try:
+
+        async def _delete():
+            client = await get_monarch_client()
+            return await client.delete_transaction(transaction_id=transaction_id)
+
+        result = run_async(_delete())
+
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to delete transaction: {e}")
+        return f"Error deleting transaction: {str(e)}"
+
+
+@mcp.tool()
+def get_recurring_transactions(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> str:
+    """
+    Get upcoming recurring transactions.
+
+    Returns scheduled recurring transactions with their merchants, amounts, and accounts.
+
+    Args:
+        start_date: Start date in YYYY-MM-DD format (defaults to start of current month)
+        end_date: End date in YYYY-MM-DD format (defaults to end of current month)
+
+    Returns:
+        List of upcoming recurring transactions.
+    """
+    try:
+
+        async def _get_recurring():
+            client = await get_monarch_client()
+
+            filters = {}
+            if start_date:
+                filters["start_date"] = start_date
+            if end_date:
+                filters["end_date"] = end_date
+
+            return await client.get_recurring_transactions(**filters)
+
+        result = run_async(_get_recurring())
+
+        # Format recurring transactions
+        recurring_list = []
+        for item in result.get("recurringTransactionItems", []):
+            recurring_info = {
+                "date": item.get("date"),
+                "amount": item.get("amount"),
+                "is_past": item.get("isPast", False),
+                "transaction_id": item.get("transactionId"),
+                "stream": {
+                    "id": item.get("stream", {}).get("id"),
+                    "frequency": item.get("stream", {}).get("frequency"),
+                    "amount": item.get("stream", {}).get("amount"),
+                    "is_approximate": item.get("stream", {}).get("isApproximate", False),
+                    "merchant": item.get("stream", {}).get("merchant", {}).get("name")
+                    if item.get("stream", {}).get("merchant") else None,
+                } if item.get("stream") else None,
+                "category": item.get("category", {}).get("name") if item.get("category") else None,
+                "account": item.get("account", {}).get("displayName") if item.get("account") else None,
+            }
+            recurring_list.append(recurring_info)
+
+        return json.dumps(recurring_list, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get recurring transactions: {e}")
+        return f"Error getting recurring transactions: {str(e)}"
+
+
+@mcp.tool()
 def refresh_accounts() -> str:
     """Request account data refresh from financial institutions."""
     try:

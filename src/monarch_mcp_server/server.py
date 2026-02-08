@@ -848,6 +848,66 @@ def mark_transaction_reviewed(
 
 
 @mcp.tool()
+def bulk_categorize_transactions(
+    transaction_ids: List[str],
+    category_id: str,
+    mark_reviewed: bool = True,
+) -> str:
+    """
+    Apply the same category to multiple transactions at once.
+
+    This is useful for categorizing similar transactions in bulk,
+    such as all purchases from the same merchant.
+
+    Args:
+        transaction_ids: List of transaction IDs to categorize
+        category_id: The category ID to apply to all transactions
+        mark_reviewed: Whether to also mark transactions as reviewed (default: True)
+
+    Returns:
+        Summary of results including success/failure counts.
+    """
+    try:
+
+        async def _bulk_categorize():
+            client = await get_monarch_client()
+
+            results = {
+                "total": len(transaction_ids),
+                "successful": 0,
+                "failed": 0,
+                "errors": [],
+            }
+
+            for txn_id in transaction_ids:
+                try:
+                    update_params = {
+                        "transaction_id": txn_id,
+                        "category_id": category_id,
+                    }
+                    if mark_reviewed:
+                        update_params["needs_review"] = False
+
+                    await client.update_transaction(**update_params)
+                    results["successful"] += 1
+                except Exception as e:
+                    results["failed"] += 1
+                    results["errors"].append({
+                        "transaction_id": txn_id,
+                        "error": str(e),
+                    })
+
+            return results
+
+        result = run_async(_bulk_categorize())
+
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to bulk categorize transactions: {e}")
+        return f"Error in bulk categorization: {str(e)}"
+
+
+@mcp.tool()
 def refresh_accounts() -> str:
     """Request account data refresh from financial institutions."""
     try:

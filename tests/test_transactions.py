@@ -15,6 +15,7 @@ from monarch_mcp_server.server import (
     set_transaction_category,
     update_transaction_notes,
     mark_transaction_reviewed,
+    bulk_categorize_transactions,
 )
 
 
@@ -327,3 +328,97 @@ class TestMarkTransactionReviewed:
         result = mark_transaction_reviewed("txn_123")
 
         assert "Error marking reviewed" in result
+
+
+class TestBulkCategorizeTransactions:
+    """Tests for bulk_categorize_transactions tool."""
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_bulk_categorize_all_success(self, mock_get_client):
+        """Test successful bulk categorization of all transactions."""
+        mock_client = AsyncMock()
+        mock_client.update_transaction.return_value = {"updateTransaction": {}}
+        mock_get_client.return_value = mock_client
+
+        result = bulk_categorize_transactions(
+            transaction_ids=["txn_1", "txn_2", "txn_3"],
+            category_id="cat_123",
+            mark_reviewed=True
+        )
+
+        data = json.loads(result)
+        assert data["total"] == 3
+        assert data["successful"] == 3
+        assert data["failed"] == 0
+        assert len(data["errors"]) == 0
+
+        # Verify update_transaction was called 3 times
+        assert mock_client.update_transaction.call_count == 3
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_bulk_categorize_partial_failure(self, mock_get_client):
+        """Test bulk categorization with some failures."""
+        mock_client = AsyncMock()
+        # First call succeeds, second fails, third succeeds
+        mock_client.update_transaction.side_effect = [
+            {"updateTransaction": {}},
+            RuntimeError("Transaction not found"),
+            {"updateTransaction": {}},
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = bulk_categorize_transactions(
+            transaction_ids=["txn_1", "txn_2", "txn_3"],
+            category_id="cat_123"
+        )
+
+        data = json.loads(result)
+        assert data["total"] == 3
+        assert data["successful"] == 2
+        assert data["failed"] == 1
+        assert len(data["errors"]) == 1
+        assert data["errors"][0]["transaction_id"] == "txn_2"
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_bulk_categorize_without_mark_reviewed(self, mock_get_client):
+        """Test bulk categorization without marking as reviewed."""
+        mock_client = AsyncMock()
+        mock_client.update_transaction.return_value = {"updateTransaction": {}}
+        mock_get_client.return_value = mock_client
+
+        bulk_categorize_transactions(
+            transaction_ids=["txn_1"],
+            category_id="cat_123",
+            mark_reviewed=False
+        )
+
+        call_kwargs = mock_client.update_transaction.call_args.kwargs
+        assert "needs_review" not in call_kwargs
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_bulk_categorize_empty_list(self, mock_get_client):
+        """Test bulk categorization with empty transaction list."""
+        mock_client = AsyncMock()
+        mock_get_client.return_value = mock_client
+
+        result = bulk_categorize_transactions(
+            transaction_ids=[],
+            category_id="cat_123"
+        )
+
+        data = json.loads(result)
+        assert data["total"] == 0
+        assert data["successful"] == 0
+        assert data["failed"] == 0
+
+    @patch('monarch_mcp_server.server.get_monarch_client')
+    def test_bulk_categorize_client_error(self, mock_get_client):
+        """Test error when client cannot be obtained."""
+        mock_get_client.side_effect = RuntimeError("Auth needed")
+
+        result = bulk_categorize_transactions(
+            transaction_ids=["txn_1"],
+            category_id="cat_123"
+        )
+
+        assert "Error in bulk categorization" in result

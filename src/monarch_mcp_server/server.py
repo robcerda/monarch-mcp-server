@@ -821,6 +821,99 @@ def get_category_groups() -> str:
         return f"Error getting category groups: {str(e)}"
 
 
+@mcp.tool()
+def get_transactions_needing_review(
+    needs_review: bool = True,
+    days: Optional[int] = None,
+    uncategorized_only: bool = False,
+    without_notes_only: bool = False,
+    limit: int = 100,
+    account_id: Optional[str] = None,
+) -> str:
+    """
+    Get transactions that need review based on various criteria.
+
+    This is the primary tool for finding transactions to categorize and review.
+
+    Args:
+        needs_review: Filter for transactions flagged as needing review (default: True)
+        days: Only include transactions from the last N days (e.g., 7 for last week)
+        uncategorized_only: Only include transactions without a category assigned
+        without_notes_only: Only include transactions without notes/memos
+        limit: Maximum number of transactions to return (default: 100)
+        account_id: Filter by specific account ID
+
+    Returns:
+        List of transactions matching the criteria with full details.
+    """
+    try:
+        from datetime import datetime, timedelta
+
+        async def _get_transactions():
+            client = await get_monarch_client()
+
+            # Build filters
+            filters = {"limit": limit}
+
+            # Date range filter
+            if days:
+                end_date = datetime.now().strftime("%Y-%m-%d")
+                start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+                filters["start_date"] = start_date
+                filters["end_date"] = end_date
+
+            if account_id:
+                filters["account_ids"] = [account_id]
+
+            # Note: has_notes filter (if supported by API)
+            if without_notes_only:
+                filters["has_notes"] = False
+
+            return await client.get_transactions(**filters)
+
+        transactions_data = run_async(_get_transactions())
+
+        # Post-filter transactions based on criteria
+        transaction_list = []
+        for txn in transactions_data.get("allTransactions", {}).get("results", []):
+            # Filter by needs_review
+            if needs_review and not txn.get("needsReview", False):
+                continue
+
+            # Filter by uncategorized (no category or null category)
+            if uncategorized_only:
+                category = txn.get("category")
+                if category and category.get("id"):
+                    continue
+
+            # Format transaction with full details
+            transaction_info = {
+                "id": txn.get("id"),
+                "date": txn.get("date"),
+                "amount": txn.get("amount"),
+                "merchant": txn.get("merchant", {}).get("name") if txn.get("merchant") else None,
+                "original_name": txn.get("plaidName") or txn.get("originalName"),
+                "category": txn.get("category", {}).get("name") if txn.get("category") else None,
+                "category_id": txn.get("category", {}).get("id") if txn.get("category") else None,
+                "account": txn.get("account", {}).get("displayName") if txn.get("account") else None,
+                "account_id": txn.get("account", {}).get("id") if txn.get("account") else None,
+                "notes": txn.get("notes"),
+                "needs_review": txn.get("needsReview", False),
+                "is_pending": txn.get("pending", False),
+                "hide_from_reports": txn.get("hideFromReports", False),
+                "tags": [
+                    {"id": tag.get("id"), "name": tag.get("name")}
+                    for tag in txn.get("tags", [])
+                ] if txn.get("tags") else [],
+            }
+            transaction_list.append(transaction_info)
+
+        return json.dumps(transaction_list, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get transactions needing review: {e}")
+        return f"Error getting transactions: {str(e)}"
+
+
 def main() -> None:
     """Main entry point for the server."""
     logger.info("Starting Monarch Money MCP Server...")

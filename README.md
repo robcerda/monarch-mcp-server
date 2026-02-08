@@ -232,6 +232,8 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 
 ### 📊 Financial Analysis
 - **Get Cashflow**: Analyze financial cashflow over specified date ranges with income/expense breakdowns
+- **Get Transactions Summary**: Quick high-level statistics about your transactions
+- **Get Spending Summary**: Spending breakdown by category with totals
 
 ### 🔐 Secure Authentication
 - **One-Time Setup**: Authenticate once, use for weeks/months
@@ -279,6 +281,8 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 | `delete_transaction_rule` | Delete a rule | `rule_id` |
 | `get_transaction_splits` | Get splits for a transaction | `transaction_id` |
 | `split_transaction` | Split a transaction into parts | `transaction_id`, `splits` (JSON array) |
+| `get_transactions_summary` | Get high-level transaction statistics | None |
+| `get_spending_summary` | Get spending breakdown by category | `start_date`, `end_date`, `limit` |
 
 ## 📝 Usage Examples
 
@@ -365,6 +369,16 @@ Create a rule to automatically categorize Amazon transactions as "Shopping" usin
 ### Split a Transaction
 ```
 Split this $100 Costco transaction into $60 for Groceries and $40 for Household using split_transaction
+```
+
+### Get Transaction Statistics
+```
+Give me a quick summary of my transactions using get_transactions_summary
+```
+
+### View Spending by Category
+```
+Show my spending breakdown by category for last month using get_spending_summary
 ```
 
 ## 📅 Date Formats

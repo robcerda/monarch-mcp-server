@@ -217,6 +217,10 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 - **Update Transaction Rule**: Modify existing rules
 - **Delete Transaction Rule**: Remove a rule
 
+### ✂️ Transaction Splits
+- **Get Transaction Splits**: View how a transaction has been split into parts
+- **Split Transaction**: Divide a single transaction into multiple parts with different categories or merchants
+
 ### 📈 Financial Analysis
 - **Get Budgets**: Access budget information including spent amounts and remaining balances
 - **Get Cashflow**: Analyze financial cashflow over specified date ranges with income/expense breakdowns
@@ -261,6 +265,8 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 | `create_transaction_rule` | Create an auto-categorization rule | `merchant_criteria_operator`, `merchant_criteria_value`, `set_category_id`, `add_tag_ids`, `amount_operator`, `amount_value` |
 | `update_transaction_rule` | Update an existing rule | `rule_id`, `merchant_criteria_operator`, `merchant_criteria_value`, `set_category_id` |
 | `delete_transaction_rule` | Delete a rule | `rule_id` |
+| `get_transaction_splits` | Get splits for a transaction | `transaction_id` |
+| `split_transaction` | Split a transaction into parts | `transaction_id`, `splits` (JSON array) |
 
 ## 📝 Usage Examples
 
@@ -317,6 +323,11 @@ Show me my upcoming recurring transactions using get_recurring_transactions
 ### Create Auto-Categorization Rule
 ```
 Create a rule to automatically categorize Amazon transactions as "Shopping" using create_transaction_rule
+```
+
+### Split a Transaction
+```
+Split this $100 Costco transaction into $60 for Groceries and $40 for Household using split_transaction
 ```
 
 ## 📅 Date Formats

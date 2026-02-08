@@ -1307,6 +1307,91 @@ def get_recurring_transactions(
 
 
 # =============================================================================
+# Transaction Splits
+# =============================================================================
+
+
+@mcp.tool()
+def get_transaction_splits(
+    transaction_id: str,
+) -> str:
+    """
+    Get the splits for a transaction.
+
+    Returns the split details if the transaction has been split into multiple parts.
+
+    Args:
+        transaction_id: The ID of the transaction to get splits for
+
+    Returns:
+        Split information for the transaction, or empty if not split.
+    """
+    try:
+
+        async def _get_splits():
+            client = await get_monarch_client()
+            return await client.get_transaction_splits(transaction_id=transaction_id)
+
+        result = run_async(_get_splits())
+
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get transaction splits: {e}")
+        return f"Error getting transaction splits: {str(e)}"
+
+
+@mcp.tool()
+def split_transaction(
+    transaction_id: str,
+    splits: str,
+) -> str:
+    """
+    Split a transaction into multiple parts with different categories/merchants.
+
+    The sum of all split amounts must equal the original transaction amount.
+    Pass an empty list to remove all splits and restore the original transaction.
+
+    Args:
+        transaction_id: The ID of the transaction to split
+        splits: JSON array of split objects. Each split should have:
+            - amount: The amount for this split (negative for expenses, positive for income)
+            - categoryId: (optional) The category ID for this split
+            - merchantName: (optional) The merchant name for this split
+            Example: '[{"amount": -50.00, "categoryId": "123", "merchantName": "Groceries"}, {"amount": -25.00, "categoryId": "456", "merchantName": "Household"}]'
+
+    Returns:
+        The updated split information for the transaction.
+    """
+    try:
+        # Parse the splits JSON
+        try:
+            split_data = json.loads(splits)
+        except json.JSONDecodeError as e:
+            return f"Error: Invalid JSON in splits parameter: {str(e)}"
+
+        if not isinstance(split_data, list):
+            return "Error: splits must be a JSON array"
+
+        async def _split_transaction():
+            client = await get_monarch_client()
+            return await client.update_transaction_splits(
+                transaction_id=transaction_id,
+                split_data=split_data
+            )
+
+        result = run_async(_split_transaction())
+
+        return json.dumps({
+            "success": True,
+            "message": f"Transaction split into {len(split_data)} parts" if split_data else "Splits removed from transaction",
+            "splits": result
+        }, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to split transaction: {e}")
+        return f"Error splitting transaction: {str(e)}"
+
+
+# =============================================================================
 # Transaction Rules API (reverse-engineered from Monarch web app)
 # =============================================================================
 

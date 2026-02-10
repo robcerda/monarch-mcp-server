@@ -63,7 +63,7 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
 
 **Important**: For security and MFA support, authentication is done outside of Claude Desktop.
 
-Open Terminal and run:
+#### Option A: Email/Password Login
 ```bash
 cd /path/to/your/monarch-mcp-server
 python login_setup.py
@@ -73,6 +73,17 @@ Follow the prompts:
 - Enter your Monarch Money email and password
 - Provide 2FA code if you have MFA enabled
 - Session will be saved automatically
+
+#### Option B: Google OAuth Login
+If you sign in to Monarch with Google:
+```bash
+cd /path/to/your/monarch-mcp-server
+python google_login.py
+```
+
+This opens a browser window where you can sign in with Google. The token is captured automatically.
+
+You can also trigger authentication from within Claude using the `authenticate_with_google` tool.
 
 ### 3. Start Using in Claude Desktop
 
@@ -94,13 +105,58 @@ Once authenticated, use these tools directly in Claude Desktop:
 - **Create Transaction**: Add new transactions to accounts
 - **Update Transaction**: Modify existing transactions (amount, description, category, date)
 
-### 📈 Financial Analysis
-- **Get Budgets**: Access budget information including spent amounts and remaining balances
+### 🏷️ Category Management
+- **Get Categories**: List all transaction categories with groups, icons, and metadata
+- **Get Category Groups**: View category groups with their associated categories
+
+### 📋 Transaction Review
+- **Get Transactions Needing Review**: Find transactions that need attention (uncategorized, no notes, flagged)
+- **Set Transaction Category**: Assign a category to a transaction
+- **Update Transaction Notes**: Add or update notes on transactions (great for receipt links)
+- **Mark Transaction Reviewed**: Clear the needs_review flag on transactions
+
+### 📦 Bulk Operations
+- **Bulk Categorize Transactions**: Apply a category to multiple transactions at once
+
+### 🔖 Tag Management
+- **Get Tags**: List all available tags with colors and usage counts
+- **Set Transaction Tags**: Apply tags to a transaction
+- **Create Tag**: Create a new tag with custom name and color
+
+### 🔍 Advanced Search
+- **Search Transactions**: Comprehensive search with filters for merchant, category, account, tags, date ranges, and amounts
+- **Get Transaction Details**: Retrieve complete details for a single transaction
+- **Delete Transaction**: Remove a transaction
+- **Get Recurring Transactions**: View upcoming recurring transactions
+
+### 🤖 Transaction Rules (Auto-Categorization)
+- **Get Transaction Rules**: List all auto-categorization rules
+- **Create Transaction Rule**: Create rules with merchant/amount conditions to auto-categorize
+- **Update Transaction Rule**: Modify existing rules
+- **Delete Transaction Rule**: Remove a rule
+
+### ✂️ Transaction Splits
+- **Get Transaction Splits**: View how a transaction has been split into parts
+- **Split Transaction**: Divide a single transaction into multiple parts with different categories or merchants
+
+### 💵 Budget Management
+- **Get Budgets**: Access budget information including spent amounts and remaining balances by category
+- **Set Budget Amount**: Create or modify budget amounts for any category or category group
+
+### 📈 Net Worth Tracking
+- **Get Net Worth**: Track total net worth over time with daily snapshots and trend analysis
+- **Get Account Balance History**: View historical balance data for any account
+- **Get Net Worth by Account Type**: See net worth breakdown across account types (checking, savings, investments, etc.)
+
+### 📊 Financial Analysis
 - **Get Cashflow**: Analyze financial cashflow over specified date ranges with income/expense breakdowns
+- **Get Transactions Summary**: Quick high-level statistics about your transactions
+- **Get Spending Summary**: Spending breakdown by category with totals
 
 ### 🔐 Secure Authentication
 - **One-Time Setup**: Authenticate once, use for weeks/months
 - **MFA Support**: Full support for two-factor authentication
+- **Google OAuth**: Sign in with Google account (no password needed)
 - **Session Persistence**: No need to re-authenticate frequently
 - **Secure**: Credentials never pass through Claude Desktop
 
@@ -109,15 +165,42 @@ Once authenticated, use these tools directly in Claude Desktop:
 | Tool | Description | Parameters |
 |------|-------------|------------|
 | `setup_authentication` | Get setup instructions | None |
+| `authenticate_with_google` | Open browser for Google OAuth login | None |
 | `check_auth_status` | Check authentication status | None |
 | `get_accounts` | Get all financial accounts | None |
 | `get_transactions` | Get transactions with filtering | `limit`, `offset`, `start_date`, `end_date`, `account_id` |
-| `get_budgets` | Get budget information | None |
+| `get_budgets` | Get budget information | `start_date`, `end_date` |
+| `set_budget_amount` | Set budget for a category | `amount`, `category_id`, `category_group_id`, `start_date`, `apply_to_future` |
 | `get_cashflow` | Get cashflow analysis | `start_date`, `end_date` |
+| `get_net_worth` | Get net worth history | `start_date`, `end_date`, `account_type` |
+| `get_account_balance_history` | Get account balance history | `account_id` |
+| `get_net_worth_by_account_type` | Get net worth by account type | `start_date`, `timeframe` |
 | `get_account_holdings` | Get investment holdings | `account_id` |
 | `create_transaction` | Create new transaction | `account_id`, `amount`, `description`, `date`, `category_id`, `merchant_name` |
 | `update_transaction` | Update existing transaction | `transaction_id`, `amount`, `description`, `category_id`, `date` |
 | `refresh_accounts` | Request account data refresh | None |
+| `get_categories` | List all transaction categories | None |
+| `get_category_groups` | List category groups with categories | None |
+| `get_transactions_needing_review` | Get transactions needing review | `needs_review`, `days`, `uncategorized`, `no_notes` |
+| `set_transaction_category` | Set category on a transaction | `transaction_id`, `category_id`, `mark_reviewed` |
+| `update_transaction_notes` | Update notes on a transaction | `transaction_id`, `notes` |
+| `mark_transaction_reviewed` | Mark transaction as reviewed | `transaction_id` |
+| `bulk_categorize_transactions` | Categorize multiple transactions | `transaction_ids`, `category_id` |
+| `get_tags` | List all tags | None |
+| `set_transaction_tags` | Set tags on a transaction | `transaction_id`, `tag_ids` |
+| `create_tag` | Create a new tag | `name`, `color` |
+| `search_transactions` | Search transactions with filters | `search`, `category_ids`, `account_ids`, `tag_ids`, `start_date`, `end_date`, `min_amount`, `max_amount` |
+| `get_transaction_details` | Get details of a transaction | `transaction_id` |
+| `delete_transaction` | Delete a transaction | `transaction_id` |
+| `get_recurring_transactions` | Get recurring transactions | None |
+| `get_transaction_rules` | List auto-categorization rules | None |
+| `create_transaction_rule` | Create an auto-categorization rule | `merchant_criteria_operator`, `merchant_criteria_value`, `set_category_id`, `add_tag_ids`, `amount_operator`, `amount_value` |
+| `update_transaction_rule` | Update an existing rule | `rule_id`, `merchant_criteria_operator`, `merchant_criteria_value`, `set_category_id` |
+| `delete_transaction_rule` | Delete a rule | `rule_id` |
+| `get_transaction_splits` | Get splits for a transaction | `transaction_id` |
+| `split_transaction` | Split a transaction into parts | `transaction_id`, `splits` (JSON array) |
+| `get_transactions_summary` | Get high-level transaction statistics | None |
+| `get_spending_summary` | Get spending breakdown by category | `start_date`, `end_date`, `limit` |
 
 ## 📝 Usage Examples
 
@@ -136,9 +219,84 @@ Show me my last 50 transactions using get_transactions with limit 50
 Use get_budgets to show my current budget status
 ```
 
+### Set a Budget Amount
+```
+Set my grocery budget to $600 for this month using set_budget_amount
+```
+
+### Apply Budget to All Future Months
+```
+Set my entertainment budget to $150 and apply it to all future months using set_budget_amount with apply_to_future=true
+```
+
+### Track Net Worth Over Time
+```
+Show my net worth trend for the past year using get_net_worth
+```
+
+### View Account Balance History
+```
+Show me how my savings account balance has changed over time using get_account_balance_history
+```
+
+### Net Worth Breakdown by Account Type
+```
+Show my net worth breakdown by account type using get_net_worth_by_account_type
+```
+
 ### Analyze Cash Flow
 ```
 Get my cashflow for the last 3 months using get_cashflow
+```
+
+### List Available Categories
+```
+Show me all available categories using get_categories
+```
+
+### Review Uncategorized Transactions
+```
+Show me transactions from the last 7 days that need review using get_transactions_needing_review
+```
+
+### Bulk Categorize Transactions
+```
+Categorize these three transactions as "Groceries" using bulk_categorize_transactions
+```
+
+### Tag a Transaction
+```
+Add the "Tax Deductible" tag to this transaction using set_transaction_tags
+```
+
+### Search for Transactions
+```
+Find all Amazon transactions over $50 from the last month using search_transactions
+```
+
+### View Recurring Bills
+```
+Show me my upcoming recurring transactions using get_recurring_transactions
+```
+
+### Create Auto-Categorization Rule
+```
+Create a rule to automatically categorize Amazon transactions as "Shopping" using create_transaction_rule
+```
+
+### Split a Transaction
+```
+Split this $100 Costco transaction into $60 for Groceries and $40 for Household using split_transaction
+```
+
+### Get Transaction Statistics
+```
+Give me a quick summary of my transactions using get_transactions_summary
+```
+
+### View Spending by Category
+```
+Show my spending breakdown by category for last month using get_spending_summary
 ```
 
 ## 📅 Date Formats
@@ -150,7 +308,7 @@ Get my cashflow for the last 3 months using get_cashflow
 
 ### Authentication Issues
 If you see "Authentication needed" errors:
-1. Run the setup command: `cd /path/to/your/monarch-mcp-server && python login_setup.py`
+1. Run the setup command: `python login_setup.py` (or `python google_login.py` for Google OAuth)
 2. Restart Claude Desktop
 3. Try using a tool like `get_accounts`
 
@@ -173,7 +331,8 @@ monarch-mcp-server/
 ├── src/monarch_mcp_server/
 │   ├── __init__.py
 │   └── server.py          # Main server implementation
-├── login_setup.py         # Authentication setup script
+├── login_setup.py         # Email/password authentication script
+├── google_login.py        # Google OAuth authentication script
 ├── pyproject.toml         # Project configuration
 ├── requirements.txt       # Dependencies
 └── README.md             # This documentation

@@ -82,10 +82,11 @@ class SecureMonarchSession:
 
     def _cleanup_old_session_files(self) -> None:
         """Clean up old insecure session files."""
+        home = os.path.expanduser("~")
         cleanup_paths = [
-            ".mm/mm_session.pickle",
-            "monarch_session.json",
-            ".mm",  # Remove the entire directory if empty
+            os.path.join(home, ".mm", "mm_session.pickle"),
+            os.path.join(home, "monarch_session.json"),
+            os.path.join(home, ".mm"),  # Remove the entire directory if empty
         ]
 
         for path in cleanup_paths:

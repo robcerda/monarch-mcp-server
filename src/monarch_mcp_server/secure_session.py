@@ -5,6 +5,8 @@ Secure session management for Monarch Money MCP Server using keyring.
 import keyring
 import logging
 import os
+import platform
+import subprocess
 from typing import Optional
 from monarchmoney import MonarchMoney
 
@@ -28,8 +30,18 @@ class SecureMonarchSession:
             self._cleanup_old_session_files()
 
         except Exception as e:
-            logger.error(f"❌ Failed to save token to keyring: {e}")
-            raise
+            # On macOS, error -25244 means the current binary doesn't own
+            # the existing keychain entry (e.g. Python was upgraded).
+            # Delete via the security CLI and retry.
+            logger.warning(f"Keyring save failed, attempting delete+recreate: {e}")
+            self._force_delete_keychain_entry()
+            try:
+                keyring.set_password(KEYRING_SERVICE, KEYRING_USERNAME, token)
+                logger.info("✅ Token saved securely to keyring (after force delete)")
+                self._cleanup_old_session_files()
+            except Exception as e2:
+                logger.error(f"❌ Failed to save token to keyring: {e2}")
+                raise
 
     def load_token(self) -> Optional[str]:
         """Load the authentication token from the system keyring."""
@@ -57,7 +69,8 @@ class SecureMonarchSession:
         except keyring.errors.PasswordDeleteError:
             logger.info("🔍 No token found in keyring to delete")
         except Exception as e:
-            logger.error(f"❌ Failed to delete token from keyring: {e}")
+            logger.warning(f"Keyring delete failed, trying security CLI: {e}")
+            self._force_delete_keychain_entry()
 
     def get_authenticated_client(self) -> Optional[MonarchMoney]:
         """Get an authenticated MonarchMoney client."""
@@ -79,6 +92,32 @@ class SecureMonarchSession:
             self.save_token(mm.token)
         else:
             logger.warning("⚠️  MonarchMoney instance has no token to save")
+
+    def _force_delete_keychain_entry(self) -> None:
+        """Force-delete the keychain entry using the macOS security CLI.
+
+        This bypasses the ACL check that causes error -25244 when the Python
+        binary that created the entry differs from the current one (e.g. after
+        a Python upgrade via mise/pyenv/homebrew).
+        """
+        if platform.system() != "Darwin":
+            return
+        try:
+            result = subprocess.run(
+                [
+                    "security", "delete-generic-password",
+                    "-s", KEYRING_SERVICE,
+                    "-a", KEYRING_USERNAME,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                logger.info("🗑️ Force-deleted keychain entry via security CLI")
+            else:
+                logger.debug(f"security CLI returned {result.returncode}: {result.stderr.strip()}")
+        except FileNotFoundError:
+            logger.debug("security CLI not found (not macOS?)")
 
     def _cleanup_old_session_files(self) -> None:
         """Clean up old insecure session files."""

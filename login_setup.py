@@ -17,24 +17,17 @@ from pathlib import Path
 src_path = Path(__file__).parent / "src"
 sys.path.insert(0, str(src_path))
 
-from monarchmoney import MonarchMoney, RequireMFAException
+from monarch_mcp_server.monarchmoney import MonarchMoney, RequireMFAException
 from dotenv import load_dotenv
 from monarch_mcp_server.secure_session import secure_session
 
 async def main():
     load_dotenv()
-    
+
     print("\n🏦 Monarch Money - Claude Desktop Setup")
     print("=" * 45)
     print("This will authenticate you once and save a session")
     print("for seamless access through Claude Desktop.\n")
-    
-    # Check the version first
-    try:
-        import monarchmoney
-        print(f"📦 MonarchMoney version: {getattr(monarchmoney, '__version__', 'unknown')}")
-    except Exception as e:
-        print(f"⚠️  Could not check version: {e}")
     
     mm = MonarchMoney()
     

@@ -6,7 +6,7 @@ import keyring
 import logging
 import os
 from typing import Optional
-from monarchmoney import MonarchMoney
+from monarch_mcp_server.monarchmoney import MonarchMoney
 
 logger = logging.getLogger(__name__)
 

@@ -1,0 +1,54 @@
+name: Publish to MCP Registry
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+jobs:
+  publish-mcp-registry:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Download mcpb artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mcpb
+
+      - name: Inject version, SHA, and MCPB URL into server.json
+        run: |
+          VERSION="${{ inputs.tag }}"
+          VERSION="${VERSION#v}"
+          MCPB_FILE="monarch-mcp-${{ inputs.tag }}.mcpb"
+          SHA256=$(sha256sum "$MCPB_FILE" | awk '{print $1}')
+          MCPB_URL="https://github.com/vargahis/monarch-mcp/releases/download/${{ inputs.tag }}/$MCPB_FILE"
+
+          jq --arg v "$VERSION" \
+             --arg sha "$SHA256" \
+             --arg url "$MCPB_URL" \
+             '.version = $v
+              | .packages[0].version = $v
+              | .packages[1].identifier = $url
+              | .packages[1].fileSha256 = $sha' \
+             server.json > server.tmp && mv server.tmp server.json
+
+          echo "::group::server.json"
+          cat server.json
+          echo "::endgroup::"
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish

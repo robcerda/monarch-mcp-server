@@ -11,53 +11,36 @@ jobs:
 
   build:
     needs: ci
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-          fetch-depth: 0
+    uses: ./.github/workflows/build.yml
+    with:
+      tag: ${{ github.ref_name }}
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install build tools
-        run: pip install build
-
-      - name: Build sdist and wheel
-        run: python -m build
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-  route:
+  detect-release-type:
     needs: build
     runs-on: ubuntu-latest
     outputs:
-      target: ${{ steps.detect.outputs.target }}
+      release_type: ${{ steps.detect.outputs.release_type }}
     steps:
-      - name: Detect publish target from tag
+      - name: Detect release type from tag
         id: detect
         run: |
           TAG="${GITHUB_REF_NAME}"
-          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.?(dev|alpha)[0-9]+$ ]] || \
-             [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.?(a|b)[0-9]+$ ]]; then
-            echo "target=testpypi" >> "$GITHUB_OUTPUT"
-          elif [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.?rc[0-9]+)?$ ]]; then
-            echo "target=pypi" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release_type=prod" >> "$GITHUB_OUTPUT"
+          elif [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+rc[0-9]+$ ]]; then
+            echo "release_type=rc" >> "$GITHUB_OUTPUT"
+          elif [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.?(dev|alpha)[0-9]+$ ]] || \
+               [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.?(a|b)[0-9]+$ ]]; then
+            echo "release_type=prerelease" >> "$GITHUB_OUTPUT"
           else
             echo "::error::Unrecognized tag pattern: $TAG"
             exit 1
           fi
-          echo "Tag $TAG -> target=$(grep target "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)"
+          echo "Tag $TAG -> release_type=$(grep release_type "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)"
 
   publish-testpypi:
-    needs: route
-    if: needs.route.outputs.target == 'testpypi'
+    needs: [detect-release-type, build]
+    if: needs.detect-release-type.outputs.release_type == 'prerelease'
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:
@@ -75,8 +58,8 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
 
   publish-pypi:
-    needs: route
-    if: needs.route.outputs.target == 'pypi'
+    needs: [detect-release-type, build]
+    if: needs.detect-release-type.outputs.release_type == 'prod'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -93,32 +76,20 @@ jobs:
 
   build-mcpb:
     needs: build
+    uses: ./.github/workflows/build-mcpb.yml
+    with:
+      tag: ${{ github.ref_name }}
+
+  github-release:
+    needs: build-mcpb
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Download mcpb artifact
+        uses: actions/download-artifact@v4
         with:
-          ref: ${{ github.ref_name }}
-          fetch-depth: 0
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install mcpb CLI
-        run: npm install -g @anthropic-ai/mcpb
-
-      - name: Inject version from git tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          jq --arg v "$VERSION" '.version = $v' manifest.json > manifest.tmp && mv manifest.tmp manifest.json
-
-      - name: Validate manifest
-        run: mcpb validate .
-
-      - name: Pack bundle
-        run: mcpb pack . monarch-mcp-${{ github.ref_name }}.mcpb
+          name: mcpb
 
       - name: Detect pre-release
         id: prerelease
@@ -138,53 +109,11 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ steps.prerelease.outputs.is_prerelease == 'true' }}
 
-      - name: Upload mcpb as workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mcpb
-          path: monarch-mcp-${{ github.ref_name }}.mcpb
-
   publish-mcp-registry:
-    needs: [publish-pypi, build-mcpb]
-    runs-on: ubuntu-latest
+    needs: [detect-release-type, publish-pypi, build-mcpb]
+    if: needs.detect-release-type.outputs.release_type == 'prod'
+    uses: ./.github/workflows/publish-mcp-registry.yml
+    with:
+      tag: ${{ github.ref_name }}
     permissions:
       id-token: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-
-      - name: Download mcpb artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: mcpb
-
-      - name: Inject version, SHA, and MCPB URL into server.json
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          MCPB_FILE="monarch-mcp-${{ github.ref_name }}.mcpb"
-          SHA256=$(sha256sum "$MCPB_FILE" | awk '{print $1}')
-          MCPB_URL="https://github.com/vargahis/monarch-mcp/releases/download/${{ github.ref_name }}/$MCPB_FILE"
-
-          jq --arg v "$VERSION" \
-             --arg sha "$SHA256" \
-             --arg url "$MCPB_URL" \
-             '.version = $v
-              | .packages[0].version = $v
-              | .packages[1].identifier = $url
-              | .packages[1].fileSha256 = $sha' \
-             server.json > server.tmp && mv server.tmp server.json
-
-          echo "::group::server.json"
-          cat server.json
-          echo "::endgroup::"
-
-      - name: Install mcp-publisher
-        run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
-
-      - name: Authenticate to MCP Registry
-        run: ./mcp-publisher login github-oidc
-
-      - name: Publish to MCP Registry
-        run: ./mcp-publisher publish

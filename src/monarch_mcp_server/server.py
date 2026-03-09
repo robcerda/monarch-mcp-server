@@ -1,11 +1,12 @@
 """Monarch Money MCP Server - Main server implementation."""
 
+import asyncio
 import json
 import logging
 import os
 import re
-import asyncio
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, Coroutine, Optional, TypeVar
 
 from dotenv import load_dotenv
@@ -13,6 +14,7 @@ from mcp.server.fastmcp import FastMCP
 from monarchmoney import MonarchMoney, RequireMFAException
 from monarchmoney.monarchmoney import MonarchMoneyEndpoints
 from pydantic import BaseModel, Field
+
 from monarch_mcp_server.secure_session import secure_session
 
 # Fix for Monarch Money API domain change (api.monarchmoney.com -> api.monarch.com)
@@ -251,9 +253,11 @@ def get_accounts() -> str:
                 "type": (account.get("type") or {}).get("name"),
                 "balance": account.get("currentBalance"),
                 "institution": (account.get("institution") or {}).get("name"),
-                "is_active": account.get("isActive")
-                if "isActive" in account
-                else not account.get("deactivatedAt"),
+                "is_active": (
+                    account.get("isActive")
+                    if "isActive" in account
+                    else not account.get("deactivatedAt")
+                ),
             }
             account_list.append(account_info)
 
@@ -314,13 +318,13 @@ def get_transactions(
                 "date": txn.get("date"),
                 "amount": txn.get("amount"),
                 "description": txn.get("description"),
-                "category": txn.get("category", {}).get("name")
-                if txn.get("category")
-                else None,
+                "category": (
+                    txn.get("category", {}).get("name") if txn.get("category") else None
+                ),
                 "account": txn.get("account", {}).get("displayName"),
-                "merchant": txn.get("merchant", {}).get("name")
-                if txn.get("merchant")
-                else None,
+                "merchant": (
+                    txn.get("merchant", {}).get("name") if txn.get("merchant") else None
+                ),
                 "is_pending": txn.get("isPending", False),
             }
             transaction_list.append(transaction_info)

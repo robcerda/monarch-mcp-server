@@ -3,17 +3,14 @@
 import os
 import logging
 import asyncio
-from typing import Any, Dict, List, Optional, Union
-from datetime import datetime, date
+from typing import Any, Dict, Optional
 import json
-import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
-from mcp.server.auth.provider import AccessTokenT
 from mcp.server.fastmcp import FastMCP
 import mcp.types as types
-from monarchmoney import MonarchMoney, RequireMFAException
+from monarchmoney import MonarchMoney, RequireMFAException  # type: ignore
 from pydantic import BaseModel, Field
 from monarch_mcp_server.secure_session import secure_session
 
@@ -28,10 +25,10 @@ load_dotenv()
 mcp = FastMCP("Monarch Money MCP Server")
 
 
-def run_async(coro):
+def run_async(coro: Any) -> Any:
     """Run async function in a new thread with its own event loop."""
 
-    def _run():
+    def _run() -> Any:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -156,7 +153,7 @@ def get_accounts() -> str:
     """Get all financial accounts from Monarch Money."""
     try:
 
-        async def _get_accounts():
+        async def _get_accounts() -> Any:
             client = await get_monarch_client()
             return await client.get_accounts()
 
@@ -165,15 +162,20 @@ def get_accounts() -> str:
         # Format accounts for display
         account_list = []
         for account in accounts.get("accounts", []):
+            type_info = account.get("type", {})
+            type_name = type_info.get("name") if isinstance(type_info, dict) else None
+
+            institution_info = account.get("institution", {})
+            institution_name = institution_info.get("name") if isinstance(institution_info, dict) else None
+
             account_info = {
                 "id": account.get("id"),
                 "name": account.get("displayName") or account.get("name"),
-                "type": (account.get("type") or {}).get("name"),
+                "type": type_name,
                 "balance": account.get("currentBalance"),
-                "institution": (account.get("institution") or {}).get("name"),
-                "is_active": account.get("isActive")
-                if "isActive" in account
-                else not account.get("deactivatedAt"),
+                "institution": institution_name,
+                "is_active": not account.get("deactivatedAt"),
+                "is_hidden": account.get("isHidden", False)
             }
             account_list.append(account_info)
 
@@ -203,7 +205,7 @@ def get_transactions(
     """
     try:
 
-        async def _get_transactions():
+        async def _get_transactions() -> Any:
             client = await get_monarch_client()
 
             # Build filters
@@ -249,7 +251,7 @@ def get_budgets() -> str:
     """Get budget information from Monarch Money."""
     try:
 
-        async def _get_budgets():
+        async def _get_budgets() -> Any:
             client = await get_monarch_client()
             return await client.get_budgets()
 
@@ -288,7 +290,7 @@ def get_cashflow(
     """
     try:
 
-        async def _get_cashflow():
+        async def _get_cashflow() -> Any:
             client = await get_monarch_client()
 
             filters = {}
@@ -317,7 +319,7 @@ def get_account_holdings(account_id: str) -> str:
     """
     try:
 
-        async def _get_holdings():
+        async def _get_holdings() -> Any:
             client = await get_monarch_client()
             return await client.get_account_holdings(account_id)
 
@@ -351,7 +353,7 @@ def create_transaction(
     """
     try:
 
-        async def _create_transaction():
+        async def _create_transaction() -> Any:
             client = await get_monarch_client()
 
             transaction_data = {
@@ -396,10 +398,10 @@ def update_transaction(
     """
     try:
 
-        async def _update_transaction():
+        async def _update_transaction() -> Any:
             client = await get_monarch_client()
 
-            update_data = {"transaction_id": transaction_id}
+            update_data: Dict[str, Any] = {"transaction_id": transaction_id}
 
             if amount is not None:
                 update_data["amount"] = amount
@@ -425,7 +427,7 @@ def refresh_accounts() -> str:
     """Request account data refresh from financial institutions."""
     try:
 
-        async def _refresh_accounts():
+        async def _refresh_accounts() -> Any:
             client = await get_monarch_client()
             return await client.request_accounts_refresh()
 
@@ -437,7 +439,7 @@ def refresh_accounts() -> str:
         return f"Error refreshing accounts: {str(e)}"
 
 
-def main():
+def main() -> None:
     """Main entry point for the server."""
     logger.info("Starting Monarch Money MCP Server...")
     try:

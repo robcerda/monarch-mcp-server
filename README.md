@@ -6,7 +6,7 @@ A Model Context Protocol (MCP) server for integrating with the Monarch Money per
 
 My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_source=share
 
-**Built with the [MonarchMoney Python library](https://github.com/hammem/monarchmoney) by [@hammem](https://github.com/hammem)** - A fantastic unofficial API for Monarch Money with full MFA support.
+**Built with the [MonarchMoneyCommunity Python library](https://github.com/bradleyseanf/monarchmoneycommunity)** - An actively maintained community fork of the Monarch Money API with full MFA support.
 
 <a href="https://glama.ai/mcp/servers/@robcerda/monarch-mcp-server">
   <img width="380" height="200" src="https://glama.ai/mcp/servers/@robcerda/monarch-mcp-server/badge" alt="monarch-mcp-server MCP server" />
@@ -193,12 +193,12 @@ monarch-mcp-server/
 
 ## 🙏 Acknowledgments
 
-This MCP server is built on top of the excellent [MonarchMoney Python library](https://github.com/hammem/monarchmoney) created by [@hammem](https://github.com/hammem). Their library provides the robust foundation that makes this integration possible, including:
+This MCP server is built on top of the [MonarchMoneyCommunity Python library](https://github.com/bradleyseanf/monarchmoneycommunity), an actively maintained community fork of the original [MonarchMoney library](https://github.com/hammem/monarchmoney) by [@hammem](https://github.com/hammem). The community fork provides:
 
+- Updated API endpoints for Monarch Money's current domain
 - Secure authentication with MFA support
 - Comprehensive API coverage for Monarch Money
 - Session management and persistence
-- Well-documented and maintained codebase
 
 Thank you to [@hammem](https://github.com/hammem) for creating and maintaining this essential library!
 

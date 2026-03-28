@@ -139,7 +139,7 @@ async def main():
             else:
                 print("This appears to be an API compatibility issue.")
                 print("The MonarchMoney library API may have changed.")
-                print("Try updating the library: pip install --upgrade monarchmoney")
+                print("Try updating the library: pip install --upgrade monarchmoneycommunity")
                 return
         
         # Save session securely to keyring

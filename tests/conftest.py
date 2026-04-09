@@ -121,6 +121,38 @@ def mock_monarch_client():
         "requestAccountsRefresh": {"success": True}
     }
 
+    client.get_transaction_categories.return_value = {
+        "categories": [
+            {
+                "id": "cat-1",
+                "name": "Groceries",
+                "icon": "🛒",
+                "group": {"id": "grp-1", "name": "Food"},
+            },
+            {
+                "id": "cat-2",
+                "name": "Dining Out",
+                "icon": "🍽️",
+                "group": {"id": "grp-1", "name": "Food"},
+            },
+        ]
+    }
+
+    client.get_transaction_tags.return_value = {
+        "householdTransactionTags": [
+            {"id": "tag-1", "name": "business", "color": "#ff0000"},
+            {"id": "tag-2", "name": "vacation", "color": "#00ff00"},
+        ]
+    }
+
+    client.set_transaction_tags.return_value = {
+        "setTransactionTags": {"transaction": {"id": "txn-1"}}
+    }
+
+    client.create_transaction_tag.return_value = {
+        "createTransactionTag": {"tag": {"id": "tag-new", "name": "new", "color": "#0000ff"}}
+    }
+
     return client
 
 

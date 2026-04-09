@@ -13,6 +13,11 @@ from monarch_mcp_server.server import (
     update_transaction,
     refresh_accounts,
     check_auth_status,
+    get_transaction_categories,
+    get_transaction_tags,
+    set_transaction_tags,
+    create_transaction_tag,
+    categorize_transaction,
 )
 
 
@@ -280,6 +285,82 @@ class TestUpdateTransaction:
         mock_monarch_client.update_transaction.side_effect = Exception("Not found")
         result = update_transaction("bad-id")
         assert "Error updating transaction" in result
+
+
+class TestGetTransactionCategories:
+    def test_returns_categories(self):
+        result = json.loads(get_transaction_categories())
+        assert len(result) == 2
+        assert result[0]["id"] == "cat-1"
+        assert result[0]["name"] == "Groceries"
+        assert result[0]["group"] == "Food"
+
+    def test_handles_api_error(self, mock_monarch_client):
+        mock_monarch_client.get_transaction_categories.side_effect = Exception("boom")
+        result = get_transaction_categories()
+        assert "Error getting transaction categories" in result
+
+
+class TestGetTransactionTags:
+    def test_returns_tags(self):
+        result = json.loads(get_transaction_tags())
+        assert len(result) == 2
+        assert result[0]["id"] == "tag-1"
+        assert result[0]["name"] == "business"
+        assert result[0]["color"] == "#ff0000"
+
+    def test_handles_api_error(self, mock_monarch_client):
+        mock_monarch_client.get_transaction_tags.side_effect = Exception("boom")
+        result = get_transaction_tags()
+        assert "Error getting transaction tags" in result
+
+
+class TestSetTransactionTags:
+    def test_sets_tags(self):
+        result = json.loads(set_transaction_tags("txn-1", ["tag-1", "tag-2"]))
+        assert "setTransactionTags" in result
+
+    def test_passes_args(self, mock_monarch_client):
+        set_transaction_tags("txn-1", ["tag-1"])
+        mock_monarch_client.set_transaction_tags.assert_called_once_with(
+            transaction_id="txn-1", tag_ids=["tag-1"]
+        )
+
+    def test_handles_api_error(self, mock_monarch_client):
+        mock_monarch_client.set_transaction_tags.side_effect = Exception("boom")
+        result = set_transaction_tags("txn-1", [])
+        assert "Error setting transaction tags" in result
+
+
+class TestCreateTransactionTag:
+    def test_creates_tag(self):
+        result = json.loads(create_transaction_tag("new", "#0000ff"))
+        assert "createTransactionTag" in result
+
+    def test_passes_args(self, mock_monarch_client):
+        create_transaction_tag("vacation", "#00ff00")
+        mock_monarch_client.create_transaction_tag.assert_called_once_with(
+            name="vacation", color="#00ff00"
+        )
+
+    def test_handles_api_error(self, mock_monarch_client):
+        mock_monarch_client.create_transaction_tag.side_effect = Exception("boom")
+        result = create_transaction_tag("x", "#fff")
+        assert "Error creating transaction tag" in result
+
+
+class TestCategorizeTransaction:
+    def test_categorizes(self, mock_monarch_client):
+        result = json.loads(categorize_transaction("txn-1", "cat-2"))
+        assert "updateTransaction" in result
+        mock_monarch_client.update_transaction.assert_called_once_with(
+            transaction_id="txn-1", category_id="cat-2"
+        )
+
+    def test_handles_api_error(self, mock_monarch_client):
+        mock_monarch_client.update_transaction.side_effect = Exception("boom")
+        result = categorize_transaction("txn-1", "cat-2")
+        assert "Error categorizing transaction" in result
 
 
 class TestRefreshAccounts:

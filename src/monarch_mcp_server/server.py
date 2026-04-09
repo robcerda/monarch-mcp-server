@@ -436,6 +436,132 @@ def update_transaction(
 
 
 @mcp.tool()
+def get_transaction_categories() -> str:
+    """Get all available transaction categories from Monarch Money."""
+    try:
+
+        async def _get() -> Any:
+            client = await get_monarch_client()
+            return await client.get_transaction_categories()
+
+        data = run_async(_get())
+
+        categories = []
+        for cat in data.get("categories", []):
+            group = cat.get("group") or {}
+            categories.append(
+                {
+                    "id": cat.get("id"),
+                    "name": cat.get("name"),
+                    "icon": cat.get("icon"),
+                    "group": group.get("name") if isinstance(group, dict) else None,
+                    "group_id": group.get("id") if isinstance(group, dict) else None,
+                }
+            )
+        return json.dumps(categories, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get transaction categories: {e}")
+        return f"Error getting transaction categories: {str(e)}"
+
+
+@mcp.tool()
+def get_transaction_tags() -> str:
+    """Get all available transaction tags from Monarch Money."""
+    try:
+
+        async def _get() -> Any:
+            client = await get_monarch_client()
+            return await client.get_transaction_tags()
+
+        data = run_async(_get())
+
+        # The library returns tags under "householdTransactionTags"
+        raw_tags = data.get("householdTransactionTags") or data.get("tags") or []
+        tags = [
+            {
+                "id": t.get("id"),
+                "name": t.get("name"),
+                "color": t.get("color"),
+            }
+            for t in raw_tags
+        ]
+        return json.dumps(tags, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get transaction tags: {e}")
+        return f"Error getting transaction tags: {str(e)}"
+
+
+@mcp.tool()
+def set_transaction_tags(transaction_id: str, tag_ids: list[str]) -> str:
+    """
+    Set the tags on a transaction (replaces existing tags).
+
+    Args:
+        transaction_id: The ID of the transaction to tag
+        tag_ids: List of tag IDs to assign. Pass [] to clear all tags.
+    """
+    try:
+
+        async def _set() -> Any:
+            client = await get_monarch_client()
+            return await client.set_transaction_tags(
+                transaction_id=transaction_id, tag_ids=tag_ids
+            )
+
+        result = run_async(_set())
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to set transaction tags: {e}")
+        return f"Error setting transaction tags: {str(e)}"
+
+
+@mcp.tool()
+def create_transaction_tag(name: str, color: str) -> str:
+    """
+    Create a new transaction tag.
+
+    Args:
+        name: Name of the new tag
+        color: Hex color code for the tag (e.g. "#ff0000")
+    """
+    try:
+
+        async def _create() -> Any:
+            client = await get_monarch_client()
+            return await client.create_transaction_tag(name=name, color=color)
+
+        result = run_async(_create())
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to create transaction tag: {e}")
+        return f"Error creating transaction tag: {str(e)}"
+
+
+@mcp.tool()
+def categorize_transaction(transaction_id: str, category_id: str) -> str:
+    """
+    Assign a category to a transaction.
+
+    Args:
+        transaction_id: The ID of the transaction to categorize
+        category_id: The category ID to assign
+    """
+    try:
+
+        async def _categorize() -> Any:
+            client = await get_monarch_client()
+            return await client.update_transaction(
+                transaction_id=transaction_id, category_id=category_id
+            )
+
+        result = run_async(_categorize())
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to categorize transaction: {e}")
+        return f"Error categorizing transaction: {str(e)}"
+
+
+@mcp.tool()
 def refresh_accounts() -> str:
     """Request account data refresh from financial institutions."""
     try:

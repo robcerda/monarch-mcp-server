@@ -192,6 +192,13 @@ def get_transactions(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     account_id: Optional[str] = None,
+    search: Optional[str] = None,
+    category_ids: Optional[list[str]] = None,
+    account_ids: Optional[list[str]] = None,
+    tag_ids: Optional[list[str]] = None,
+    has_notes: Optional[bool] = None,
+    is_split: Optional[bool] = None,
+    is_recurring: Optional[bool] = None,
 ) -> str:
     """
     Get transactions from Monarch Money.
@@ -201,7 +208,14 @@ def get_transactions(
         offset: Number of transactions to skip (default: 0)
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format
-        account_id: Specific account ID to filter by
+        account_id: Specific account ID to filter by (deprecated, use account_ids)
+        search: Search query to filter transactions
+        category_ids: List of category IDs to filter by
+        account_ids: List of account IDs to filter by
+        tag_ids: List of tag IDs to filter by
+        has_notes: Filter for transactions with/without notes
+        is_split: Filter for split transactions
+        is_recurring: Filter for recurring transactions
     """
     try:
 
@@ -209,13 +223,31 @@ def get_transactions(
             client = await get_monarch_client()
 
             # Build filters
-            filters = {}
+            filters: Dict[str, Any] = {}
             if start_date:
                 filters["start_date"] = start_date
             if end_date:
                 filters["end_date"] = end_date
-            if account_id:
-                filters["account_id"] = account_id
+            if search:
+                filters["search"] = search
+            if has_notes is not None:
+                filters["has_notes"] = has_notes
+            if is_split is not None:
+                filters["is_split"] = is_split
+            if is_recurring is not None:
+                filters["is_recurring"] = is_recurring
+
+            # Merge account_id (singular, backward compat) into account_ids list
+            merged_account_ids = list(account_ids or [])
+            if account_id and account_id not in merged_account_ids:
+                merged_account_ids.append(account_id)
+            if merged_account_ids:
+                filters["account_ids"] = merged_account_ids
+
+            if category_ids:
+                filters["category_ids"] = category_ids
+            if tag_ids:
+                filters["tag_ids"] = tag_ids
 
             return await client.get_transactions(limit=limit, offset=offset, **filters)
 
@@ -232,11 +264,27 @@ def get_transactions(
                 "category": txn.get("category", {}).get("name")
                 if txn.get("category")
                 else None,
+                "category_id": txn.get("category", {}).get("id")
+                if txn.get("category")
+                else None,
                 "account": txn.get("account", {}).get("displayName"),
+                "account_id": txn.get("account", {}).get("id")
+                if txn.get("account")
+                else None,
                 "merchant": txn.get("merchant", {}).get("name")
                 if txn.get("merchant")
                 else None,
                 "is_pending": txn.get("isPending", False),
+                "needs_review": txn.get("needsReview"),
+                "notes": txn.get("notes"),
+                "is_recurring": txn.get("isRecurring"),
+                "review_status": txn.get("reviewStatus"),
+                "is_split_transaction": txn.get("isSplitTransaction"),
+                "tags": [
+                    {"id": t.get("id"), "name": t.get("name")}
+                    for t in txn.get("tags", [])
+                ],
+                "hide_from_reports": txn.get("hideFromReports"),
             }
             transaction_list.append(transaction_info)
 

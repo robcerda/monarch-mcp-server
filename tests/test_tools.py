@@ -77,11 +77,23 @@ class TestGetTransactions:
         assert result[0]["id"] == "txn-1"
         assert result[0]["amount"] == -42.50
         assert result[0]["category"] == "Groceries"
+        assert result[0]["category_id"] == "cat-1"
+        assert result[0]["account_id"] == "acc-1"
         assert result[0]["merchant"] == "Whole Foods"
+        assert result[0]["needs_review"] is True
+        assert result[0]["notes"] == "weekly groceries"
+        assert result[0]["is_recurring"] is False
+        assert result[0]["review_status"] == "needs_review"
+        assert result[0]["is_split_transaction"] is False
+        assert result[0]["hide_from_reports"] is False
+        assert result[0]["tags"] == [{"id": "tag-1", "name": "business"}]
 
     def test_handles_null_merchant(self):
         result = json.loads(get_transactions())
         assert result[1]["merchant"] is None
+        assert result[1]["notes"] is None
+        assert result[1]["needs_review"] is False
+        assert result[1]["tags"] == []
 
     def test_handles_null_category(self, mock_monarch_client):
         mock_monarch_client.get_transactions.return_value = {
@@ -93,15 +105,23 @@ class TestGetTransactions:
                         "amount": -10.00,
                         "description": "ATM",
                         "category": None,
-                        "account": {"displayName": "Checking"},
+                        "account": {"id": "acc-1", "displayName": "Checking"},
                         "merchant": None,
                         "isPending": True,
+                        "needsReview": False,
+                        "notes": None,
+                        "isRecurring": False,
+                        "reviewStatus": None,
+                        "isSplitTransaction": False,
+                        "hideFromReports": False,
+                        "tags": [],
                     }
                 ]
             }
         }
         result = json.loads(get_transactions())
         assert result[0]["category"] is None
+        assert result[0]["category_id"] is None
         assert result[0]["is_pending"] is True
 
     def test_passes_filters_to_client(self, mock_monarch_client):
@@ -112,7 +132,43 @@ class TestGetTransactions:
             limit=10,
             offset=5,
             start_date="2026-03-01",
-            account_id="acc-1",
+            account_ids=["acc-1"],
+        )
+
+    def test_account_id_backward_compat(self, mock_monarch_client):
+        get_transactions(account_id="acc-1")
+        mock_monarch_client.get_transactions.assert_called_once_with(
+            limit=100, offset=0, account_ids=["acc-1"]
+        )
+
+    def test_account_id_merged_with_account_ids(self, mock_monarch_client):
+        get_transactions(account_id="acc-1", account_ids=["acc-2"])
+        mock_monarch_client.get_transactions.assert_called_once_with(
+            limit=100, offset=0, account_ids=["acc-2", "acc-1"]
+        )
+
+    def test_account_id_not_duplicated(self, mock_monarch_client):
+        get_transactions(account_id="acc-1", account_ids=["acc-1"])
+        mock_monarch_client.get_transactions.assert_called_once_with(
+            limit=100, offset=0, account_ids=["acc-1"]
+        )
+
+    def test_search_filter(self, mock_monarch_client):
+        get_transactions(search="order-123")
+        mock_monarch_client.get_transactions.assert_called_once_with(
+            limit=100, offset=0, search="order-123"
+        )
+
+    def test_boolean_filters(self, mock_monarch_client):
+        get_transactions(has_notes=True, is_split=False, is_recurring=True)
+        mock_monarch_client.get_transactions.assert_called_once_with(
+            limit=100, offset=0, has_notes=True, is_split=False, is_recurring=True
+        )
+
+    def test_list_filters(self, mock_monarch_client):
+        get_transactions(category_ids=["cat-1"], tag_ids=["tag-1", "tag-2"])
+        mock_monarch_client.get_transactions.assert_called_once_with(
+            limit=100, offset=0, category_ids=["cat-1"], tag_ids=["tag-1", "tag-2"]
         )
 
     def test_handles_empty_transactions(self, mock_monarch_client):

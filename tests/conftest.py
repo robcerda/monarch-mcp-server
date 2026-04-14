@@ -32,6 +32,7 @@ WRITE_TOOL_NAMES = frozenset({
     "set_budget_amount", "update_transaction_splits",
     "create_transaction_category", "delete_transaction_category",
     "create_manual_account", "update_account", "delete_account",
+    "create_transaction_rule",
 })
 
 

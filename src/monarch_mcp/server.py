@@ -276,6 +276,7 @@ def get_transactions(  # pylint: disable=too-many-arguments,too-many-positional-
     is_split: Optional[bool] = None,
     is_recurring: Optional[bool] = None,
     synced_from_institution: Optional[bool] = None,
+    needs_review: Optional[bool] = None,
 ) -> str:
     """
     Get transactions from Monarch Money.
@@ -296,6 +297,7 @@ def get_transactions(  # pylint: disable=too-many-arguments,too-many-positional-
         is_split: Filter split/unsplit transactions
         is_recurring: Filter recurring/non-recurring transactions
         synced_from_institution: Filter synced/manual transactions
+        needs_review: Filter transactions that need review
     """
     if bool(start_date) != bool(end_date):
         return json.dumps(
@@ -339,6 +341,9 @@ def get_transactions(  # pylint: disable=too-many-arguments,too-many-positional-
             filters["is_recurring"] = is_recurring
         if synced_from_institution is not None:
             filters["synced_from_institution"] = synced_from_institution
+
+        if needs_review is not None:
+            filters["needs_review"] = needs_review
 
         return await client.get_transactions(limit=limit, offset=offset, **filters)
 
@@ -692,6 +697,102 @@ def delete_transaction_tag(tag_id: str) -> str:
     run_async(_delete_transaction_tag())
 
     return json.dumps({"deleted": True, "tag_id": tag_id}, indent=2)
+
+
+@mcp.tool(enabled=_WRITE_ENABLED)
+@_handle_mcp_errors("creating transaction rule")
+def create_transaction_rule(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    set_category_id: str,
+    merchant_name_value: Optional[str] = None,
+    merchant_name_operator: str = "contains",
+    original_statement_value: Optional[str] = None,
+    original_statement_operator: str = "contains",
+    account_ids: Optional[List[str]] = None,
+    apply_to_existing_transactions: bool = False,
+) -> str:
+    """
+    Create a Monarch Money transaction rule that automatically categorizes transactions.
+
+    At least one of merchant_name_value or original_statement_value must be provided.
+
+    Args:
+        set_category_id: Category ID to assign when the rule matches (required)
+        merchant_name_value: Merchant name to match (e.g. "Amazon", "Whole Foods")
+        merchant_name_operator: How to match the merchant name — "contains" (default) or "eq"
+        original_statement_value: Raw statement description to match
+        original_statement_operator: How to match the statement text — "contains" (default) or "eq"
+        account_ids: Restrict rule to specific account IDs (null = all accounts)
+        apply_to_existing_transactions: Also re-categorize past transactions that match
+    """
+    if not merchant_name_value and not original_statement_value:
+        return json.dumps(
+            {"error": "At least one of merchant_name_value or "
+                      "original_statement_value is required"},
+            indent=2,
+        )
+
+    valid_operators = {"contains", "eq"}
+    if merchant_name_operator not in valid_operators:
+        return json.dumps(
+            {"error": f"merchant_name_operator must be one of: {sorted(valid_operators)}"},
+            indent=2,
+        )
+    if original_statement_operator not in valid_operators:
+        return json.dumps(
+            {"error": f"original_statement_operator must be one of: {sorted(valid_operators)}"},
+            indent=2,
+        )
+
+    input_data: Dict[str, Any] = {
+        "setCategoryAction": set_category_id,
+        "applyToExistingTransactions": apply_to_existing_transactions,
+    }
+
+    if merchant_name_value:
+        input_data["merchantNameCriteria"] = [
+            {"operator": merchant_name_operator, "value": merchant_name_value}
+        ]
+
+    if original_statement_value:
+        input_data["originalStatementCriteria"] = [
+            {"operator": original_statement_operator, "value": original_statement_value}
+        ]
+
+    if account_ids:
+        input_data["accountIds"] = account_ids
+
+    async def _create_transaction_rule():
+        client = await get_monarch_client()
+        mutation = gql(
+            """
+            mutation Common_CreateTransactionRuleMutationV2($input: CreateTransactionRuleInput!) {
+                createTransactionRuleV2(input: $input) {
+                    errors {
+                        message
+                    }
+                }
+            }
+            """
+        )
+        variables = {"input": input_data}
+        return await client.gql_call(
+            operation="Common_CreateTransactionRuleMutationV2",
+            graphql_query=mutation,
+            variables=variables,
+        )
+
+    result = run_async(_create_transaction_rule())
+
+    # Surface any API-level errors from the mutation payload
+    rule_result = result.get("createTransactionRuleV2", {}) if isinstance(result, dict) else {}
+    errors = rule_result.get("errors") or []
+    if errors:
+        return json.dumps(
+            {"error": errors[0].get("message", "Unknown error"), "errors": errors},
+            indent=2,
+        )
+
+    return json.dumps({"created": True, "input": input_data}, indent=2)
 
 
 @mcp.tool(enabled=_WRITE_ENABLED)

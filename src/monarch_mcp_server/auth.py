@@ -8,8 +8,6 @@ the returned status string.
 
 from __future__ import annotations
 
-from typing import Optional
-
 from mcp.server.fastmcp import Context
 from monarchmoney import MonarchMoney, RequireMFAException
 from pydantic import BaseModel, Field
@@ -19,14 +17,7 @@ from monarch_mcp_server.secure_session import secure_session
 
 class LoginForm(BaseModel):
     email: str = Field(description="Monarch Money email address")
-    password: str = Field(
-        description="Monarch Money password",
-        json_schema_extra={"format": "password"},
-    )
-    mfa_code: Optional[str] = Field(
-        default=None,
-        description="Optional MFA code if you have two-factor auth enabled",
-    )
+    password: str = Field(description="Monarch Money password")
 
 
 class MFAForm(BaseModel):
@@ -36,10 +27,9 @@ class MFAForm(BaseModel):
 class TokenForm(BaseModel):
     token: str = Field(
         description=(
-            "Monarch Money session token. Grab it in browser DevTools → "
-            "Application → Local Storage → app.monarchmoney.com, key 'token'."
+            "Monarch Money session token. Grab it in browser DevTools, "
+            "Application tab, Local Storage for app.monarchmoney.com, key 'token'."
         ),
-        json_schema_extra={"format": "password"},
     )
 
 
@@ -61,16 +51,15 @@ async def login_interactive(ctx: Context) -> str:
             save_session=False,
         )
     except RequireMFAException:
-        code = form.mfa_code
-        if not code:
-            mfa_result = await ctx.elicit(
-                message="Enter your Monarch Money MFA code.",
-                schema=MFAForm,
-            )
-            if mfa_result.action != "accept":
-                return "Login cancelled."
-            code = mfa_result.data.mfa_code
-        await mm.multi_factor_authenticate(form.email, form.password, code)
+        mfa_result = await ctx.elicit(
+            message="Enter your Monarch Money MFA code.",
+            schema=MFAForm,
+        )
+        if mfa_result.action != "accept":
+            return "Login cancelled."
+        await mm.multi_factor_authenticate(
+            form.email, form.password, mfa_result.data.mfa_code
+        )
 
     secure_session.save_authenticated_session(mm)
     return "Logged in. Session saved to system keyring."

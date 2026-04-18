@@ -2,301 +2,138 @@
 
 # Monarch Money MCP Server
 
-A Model Context Protocol (MCP) server for integrating with the Monarch Money personal finance platform. This server provides seamless access to your financial accounts, transactions, budgets, and analytics through Claude Desktop and Claude Code.
+A Model Context Protocol (MCP) server for the [Monarch Money](https://www.monarchmoney.com) personal finance platform. Exposes accounts, transactions, budgets, and cashflow as tools any MCP client (Claude Code, Claude Desktop, etc.) can call.
 
-My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_source=share
+Built on the [MonarchMoneyCommunity](https://github.com/bradleyseanf/monarchmoneycommunity) Python library, which maintains the underlying GraphQL API client and MFA support.
 
-**Built with the [MonarchMoneyCommunity Python library](https://github.com/bradleyseanf/monarchmoneycommunity)** - An actively maintained community fork of the Monarch Money API with full MFA support.
+## Quick Start
 
-<a href="https://glama.ai/mcp/servers/@robcerda/monarch-mcp-server">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/@robcerda/monarch-mcp-server/badge" alt="monarch-mcp-server MCP server" />
-</a>
+### 1. Install
 
-## 🚀 Quick Start
-
-### 1. Installation
-
-1. **Clone this repository**:
-   ```bash
-   git clone https://github.com/robcerda/monarch-mcp-server.git
-   cd monarch-mcp-server
-   ```
-
-2. **Install dependencies**:
-
-   **Using `pip`**:
-   ```bash
-   pip install -r requirements.txt
-   pip install -e .
-   ```
-
-   **Using `uv`** (alternative):
-   ```bash
-   uv sync
-   ```
-
-3. **Configure Claude Desktop**:
-   Add this to your Claude Desktop configuration file:
-
-   **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-   **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-
-   ```json
-   {
-     "mcpServers": {
-       "Monarch Money": {
-         "command": "/opt/homebrew/bin/uv",
-         "args": [
-           "run",
-           "--with",
-           "mcp[cli]",
-           "--with-editable",
-           "/path/to/your/monarch-mcp-server",
-           "mcp",
-           "run",
-           "/path/to/your/monarch-mcp-server/src/monarch_mcp_server/server.py"
-         ]
-       }
-     }
-   }
-   ```
-
-   **Important**: Replace `/path/to/your/monarch-mcp-server` with your actual path!
-
-4. **Restart Claude Desktop**
-
-**OR**
-
-3. **Configure Claude Code** (CLI):
-   Add this to your Claude Code configuration file:
-
-   **Global** (all projects):
-
-   **macOS/Linux**: `~/.claude.json`
-
-   **Windows**: `%USERPROFILE%\.claude.json`
-
-   ```json
-   {
-     "mcpServers": {
-       "Monarch Money": {
-         "command": "/opt/homebrew/bin/uv",
-         "args": [
-           "run",
-           "--with",
-           "mcp[cli]",
-           "--with-editable",
-           "/path/to/your/monarch-mcp-server",
-           "mcp",
-           "run",
-           "/path/to/your/monarch-mcp-server/src/monarch_mcp_server/server.py"
-         ]
-       }
-     }
-   }
-   ```
-
-   **Project-level** (specific directory):
-
-   Create `.mcp.json` in your project directory:
-
-   ```json
-   {
-     "Monarch Money": {
-       "command": "/opt/homebrew/bin/uv",
-       "args": [
-         "run",
-         "--with",
-         "mcp[cli]",
-         "--with-editable",
-         "/path/to/your/monarch-mcp-server",
-         "mcp",
-         "run",
-         "/path/to/your/monarch-mcp-server/src/monarch_mcp_server/server.py"
-       ]
-     }
-   }
-   ```
-
-   **If installed via `pip`** instead of `uv`, use:
-   ```json
-   {
-     "command": "python",
-     "args": ["/path/to/your/monarch-mcp-server/src/monarch_mcp_server/server.py"]
-   }
-   ```
-
-   **Important**: Replace `/path/to/your/monarch-mcp-server` with your actual path!
-
-4. **Restart Claude Code**
-
-### 2. One-Time Authentication Setup
-
-**Important**: For security and MFA support, authentication is done outside of Claude.
-
-Open Terminal and run:
-
-**Using `python`**:
 ```bash
-cd /path/to/your/monarch-mcp-server
-python login_setup.py
+git clone https://github.com/robcerda/monarch-mcp-server.git
+cd monarch-mcp-server
+uv sync
 ```
 
-**Using `uv`**:
-```bash
-cd /path/to/your/monarch-mcp-server
-uv run python login_setup.py
+(`pip install -r requirements.txt && pip install -e .` also works.)
+
+### 2. Register the server
+
+**Claude Code** (`~/.claude.json` for global, `.mcp.json` for project-level):
+
+```json
+{
+  "mcpServers": {
+    "monarch-money": {
+      "command": "/opt/homebrew/bin/uv",
+      "args": [
+        "run",
+        "--with", "mcp[cli]",
+        "--with-editable", "/path/to/monarch-mcp-server",
+        "mcp", "run",
+        "/path/to/monarch-mcp-server/src/monarch_mcp_server/server.py"
+      ]
+    }
+  }
+}
 ```
 
-Follow the prompts:
-- Enter your Monarch Money email and password
-- Provide 2FA code if you have MFA enabled
-- Session will be saved automatically
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS): same structure.
 
-### 3. Start Using
+Replace `/path/to/monarch-mcp-server` with your checkout path. Restart the client.
 
-Once authenticated, use these tools directly in Claude Desktop or Claude Code:
-- `get_accounts` - View all your financial accounts
-- `get_transactions` - Recent transactions with filtering
-- `get_budgets` - Budget information and spending
-- `get_cashflow` - Income/expense analysis
+### 3. Sign in
 
-## ✨ Features
+From any chat with the MCP server connected, just say:
 
-### 📊 Account Management
-- **Get Accounts**: View all linked financial accounts with balances and institution info
-- **Get Account Holdings**: See securities and investments in investment accounts
-- **Refresh Accounts**: Request real-time data updates from financial institutions
+> sign me in to monarch
 
-### 💰 Transaction Access
-- **Get Transactions**: Fetch transaction data with filtering by date, account, and pagination
-- **Create Transaction**: Add new transactions to accounts
-- **Update Transaction**: Modify existing transactions (amount, description, category, date)
+The `monarch_login` tool opens a secure form in the client UI for your email, password, and MFA code (if needed). Credentials travel directly from the client UI to the server via the MCP protocol — they are **never** passed as tool arguments and **never** enter the model's context. The resulting session token is saved to your system keyring so you don't need to sign in again until it expires.
 
-### 📈 Financial Analysis
-- **Get Budgets**: Access budget information including spent amounts and remaining balances
-- **Get Cashflow**: Analyze financial cashflow over specified date ranges with income/expense breakdowns
+If you sign in with Google/SSO, use `monarch_login_with_token` instead and paste your browser's session token (DevTools → Application → Local Storage → `app.monarchmoney.com` → key `token`).
 
-### 🔐 Secure Authentication
-- **One-Time Setup**: Authenticate once, use for weeks/months
-- **MFA Support**: Full support for two-factor authentication
-- **Session Persistence**: No need to re-authenticate frequently
-- **Secure**: Credentials never pass through Claude
+## Tools
 
-## 🛠️ Available Tools
+### Auth
+| Tool | Purpose |
+|------|---------|
+| `monarch_login` | Password + MFA sign-in via elicitation |
+| `monarch_login_with_token` | Paste a browser session token (SSO users) |
+| `monarch_logout` | Clear stored session from keyring |
+| `check_auth_status` | Report whether the stored session is live |
 
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `setup_authentication` | Get setup instructions | None |
-| `check_auth_status` | Check authentication status | None |
-| `get_accounts` | Get all financial accounts | None |
-| `get_transactions` | Get transactions with filtering | `limit`, `offset`, `start_date`, `end_date`, `account_id` |
-| `get_budgets` | Get budget information | None |
-| `get_cashflow` | Get cashflow analysis | `start_date`, `end_date` |
-| `get_account_holdings` | Get investment holdings | `account_id` |
-| `create_transaction` | Create new transaction | `account_id`, `amount`, `description`, `date`, `category_id`, `merchant_name` |
-| `update_transaction` | Update existing transaction | `transaction_id`, `amount`, `description`, `category_id`, `date` |
-| `refresh_accounts` | Request account data refresh | None |
+### Accounts
+| Tool | Purpose |
+|------|---------|
+| `get_accounts` | List all linked accounts with balances |
+| `get_account_holdings` | Securities/investments in a given account |
+| `refresh_accounts` | Ask Monarch to re-sync from institutions |
 
-## 📝 Usage Examples
+### Transactions
+| Tool | Purpose |
+|------|---------|
+| `get_transactions` | Fetch with filtering by date, account, pagination |
+| `create_transaction` | Add a new transaction |
+| `update_transaction` | Modify fields on an existing transaction |
+| `categorize_transaction` | Shortcut: set category on a transaction |
 
-### View Your Accounts
-```
-Use get_accounts to show me all my financial accounts
-```
+### Categories & tags
+| Tool | Purpose |
+|------|---------|
+| `get_transaction_categories` | List available categories |
+| `get_transaction_category_groups` | List category groups |
+| `create_transaction_category` | Create a new category |
+| `get_transaction_tags` | List available tags |
+| `set_transaction_tags` | Replace the tags on a transaction |
+| `add_transaction_tag` | Add a tag without clobbering existing ones |
+| `create_transaction_tag` | Create a new tag |
 
-### Get Recent Transactions
-```
-Show me my last 50 transactions using get_transactions with limit 50
-```
+### Budgets & cashflow
+| Tool | Purpose |
+|------|---------|
+| `get_budgets` | Current budget status |
+| `get_cashflow` | Income/expense analysis |
 
-### Check Spending vs Budget
-```
-Use get_budgets to show my current budget status
-```
+## Security
 
-### Analyze Cash Flow
-```
-Get my cashflow for the last 3 months using get_cashflow
-```
+- **Credentials never reach the model.** Sign-in uses MCP [elicitation](https://modelcontextprotocol.io) (form mode): email, password, and MFA code flow client-UI → server directly as a protocol message. They never appear in tool arguments, the transcript, or the model's context window.
+- **Sessions stored in the system keyring.** macOS Keychain, GNOME Keyring / KWallet, or Windows Credential Manager, via [`keyring`](https://pypi.org/project/keyring/). A file fallback at `~/.monarch-mcp-server/token` with `0600` permissions is used on systems without a usable backend.
+- **MFA supported.** If Monarch requires MFA, the login tool re-elicits just the code and retries.
+- **No plaintext password on disk.** Only the short-lived session token is persisted.
 
-## 📅 Date Formats
+## Date formats & sign conventions
 
-- All dates should be in `YYYY-MM-DD` format (e.g., "2024-01-15")
-- Transaction amounts: **positive** for income, **negative** for expenses
+- Dates: `YYYY-MM-DD` everywhere.
+- Transaction amounts: **positive** = income, **negative** = expense.
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
-### Authentication Issues
-If you see "Authentication needed" errors:
-1. Run the setup command: `cd /path/to/your/monarch-mcp-server && python login_setup.py` (or `uv run python login_setup.py`)
-2. Restart Claude Desktop or Claude Code
-3. Try using a tool like `get_accounts`
+| Symptom | Fix |
+|---------|-----|
+| `Not signed in to Monarch Money` | Call `monarch_login` |
+| `Stored token appears invalid` | Call `monarch_login` to refresh |
+| Tools don't appear in the client | Restart the client (MCP tool lists are cached at session start) |
+| `Python>=3.12,<3.14` from uv | Launch the client from a shell with Python 3.12+ on PATH, or pin with `--python 3.12` in the MCP command args |
 
-### Session Expired
-Sessions last for weeks, but if expired:
-1. Run the same setup command again: `python login_setup.py` (or `uv run python login_setup.py`)
-2. Enter your credentials and 2FA code
-3. Session will be refreshed automatically
+## Project structure
 
-### Common Error Messages
-- **"No valid session found"**: Run `python login_setup.py` (or `uv run python login_setup.py`) 
-- **"Invalid account ID"**: Use `get_accounts` to see valid account IDs
-- **"Date format error"**: Use YYYY-MM-DD format for dates
-
-## 🏗️ Technical Details
-
-### Project Structure
 ```
 monarch-mcp-server/
 ├── src/monarch_mcp_server/
 │   ├── __init__.py
-│   └── server.py          # Main server implementation
-├── login_setup.py         # Authentication setup script
-├── pyproject.toml         # Project configuration
-├── requirements.txt       # Dependencies
-└── README.md             # This documentation
+│   ├── server.py          # Tool definitions
+│   ├── auth.py            # Elicitation-based login
+│   └── secure_session.py  # Keyring + file fallback
+├── pyproject.toml
+├── requirements.txt
+└── README.md
 ```
 
-### Session Management
-- Sessions are stored securely in `.mm/mm_session.pickle`
-- Automatic session discovery and loading
-- Sessions persist across Claude Desktop and Claude Code restarts
-- No need for frequent re-authentication
+## Acknowledgments
 
-### Security Features
-- Credentials never transmitted through Claude Desktop or Claude Code
-- MFA/2FA fully supported
-- Session files are encrypted
-- Authentication handled in secure terminal environment
+Built on [MonarchMoneyCommunity](https://github.com/bradleyseanf/monarchmoneycommunity) by [@bradleyseanf](https://github.com/bradleyseanf), an active fork of the original [MonarchMoney](https://github.com/hammem/monarchmoney) library by [@hammem](https://github.com/hammem).
 
-## 🙏 Acknowledgments
+## License
 
-This MCP server is built on top of the [MonarchMoneyCommunity Python library](https://github.com/bradleyseanf/monarchmoneycommunity), an actively maintained community fork of the original [MonarchMoney library](https://github.com/hammem/monarchmoney) by [@hammem](https://github.com/hammem). The community fork provides:
-
-- Updated API endpoints for Monarch Money's current domain
-- Secure authentication with MFA support
-- Comprehensive API coverage for Monarch Money
-- Session management and persistence
-
-Thank you to [@hammem](https://github.com/hammem) for creating and maintaining this essential library!
-
-## 📄 License
-
-MIT License
-
-## 🆘 Support
-
-For issues:
-1. Check authentication with `check_auth_status`
-2. Run the setup command again: `cd /path/to/your/monarch-mcp-server && python login_setup.py`
-3. Check error logs for detailed messages
-4. Ensure Monarch Money service is accessible
-
-## 🔄 Updates
-
-To update the server:
-1. Pull latest changes from repository
-2. Restart Claude Desktop or Claude Code
-3. Re-run authentication if needed: `python login_setup.py`
+MIT

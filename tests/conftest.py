@@ -1,6 +1,5 @@
 """Shared test fixtures for Monarch MCP Server tests."""
 
-import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -126,13 +125,13 @@ def mock_monarch_client():
             {
                 "id": "cat-1",
                 "name": "Groceries",
-                "icon": "🛒",
+                "icon": "",
                 "group": {"id": "grp-1", "name": "Food"},
             },
             {
                 "id": "cat-2",
                 "name": "Dining Out",
-                "icon": "🍽️",
+                "icon": "",
                 "group": {"id": "grp-1", "name": "Food"},
             },
         ]
@@ -168,7 +167,9 @@ def mock_monarch_client():
     }
 
     client.create_transaction_tag.return_value = {
-        "createTransactionTag": {"tag": {"id": "tag-new", "name": "new", "color": "#0000ff"}}
+        "createTransactionTag": {
+            "tag": {"id": "tag-new", "name": "new", "color": "#0000ff"}
+        }
     }
 
     return client
@@ -176,10 +177,9 @@ def mock_monarch_client():
 
 @pytest.fixture(autouse=True)
 def patch_monarch_client(mock_monarch_client):
-    """Automatically patch get_monarch_client for all tests."""
+    """Patch the server's `_get_client` to return our mock for every test."""
     with patch(
-        "monarch_mcp_server.server.get_monarch_client",
-        new_callable=AsyncMock,
+        "monarch_mcp_server.server._get_client",
         return_value=mock_monarch_client,
     ):
         yield mock_monarch_client

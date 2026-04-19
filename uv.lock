@@ -625,7 +625,6 @@ dependencies = [
     { name = "mcp", extra = ["cli"] },
     { name = "monarchmoneycommunity" },
     { name = "pydantic" },
-    { name = "python-dotenv" },
 ]
 
 [package.optional-dependencies]
@@ -651,7 +650,6 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
 ]
 provides-extras = ["dev"]
 

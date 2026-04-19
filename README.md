@@ -116,19 +116,134 @@ If you sign in with Google/SSO, use `monarch_login_with_token` instead and paste
 | Tools don't appear in the client | Restart the client (MCP tool lists are cached at session start) |
 | `Python>=3.12,<3.14` from uv | Launch the client from a shell with Python 3.12+ on PATH, or pin with `--python 3.12` in the MCP command args |
 
+## Architecture
+
+### Components
+
+```
+  ┌──────────────────────────┐
+  │  MCP client              │   Claude Code / Claude Desktop / ...
+  │  (Claude Code, etc.)     │
+  └──────────┬───────────────┘
+             │ stdio (MCP protocol: JSON-RPC + elicitation)
+             ▼
+  ┌──────────────────────────┐
+  │  monarch-mcp-server      │   this package
+  │  ├─ server.py            │     tool definitions (20 tools)
+  │  ├─ auth.py              │     elicitation-based login flow
+  │  └─ secure_session.py    │     keyring / file-fallback storage
+  └──────────┬───────────────┘
+             │ Python API
+             ▼
+  ┌──────────────────────────┐
+  │  monarchmoneycommunity   │   GraphQL client, auth, endpoints
+  └──────────┬───────────────┘
+             │ HTTPS (GraphQL)
+             ▼
+  ┌──────────────────────────┐
+  │  Monarch Money API       │
+  └──────────────────────────┘
+```
+
+### Auth flow (`monarch_login`)
+
+Elicitation keeps credentials out of the model's context: they travel client-UI → server directly over the MCP protocol and the server only persists the short-lived session token.
+
+```
+  Claude Code                          monarch-mcp-server             Monarch API
+      │                                       │                            │
+      │  tool call: monarch_login             │                            │
+      ├──────────────────────────────────────▶│                            │
+      │                                       │                            │
+      │         ctx.elicit(LoginForm)         │                            │
+      │◀──────────────────────────────────────┤                            │
+      │  [ UI: email + password form ]        │                            │
+      │  user submits                         │                            │
+      ├──────────────────────────────────────▶│                            │
+      │                                       │  mm.login(email, pw)       │
+      │                                       ├───────────────────────────▶│
+      │                                       │◀── RequireMFAException ────┤
+      │                                       │                            │
+      │         ctx.elicit(MFAForm)           │                            │
+      │◀──────────────────────────────────────┤                            │
+      │  [ UI: MFA code form ]                │                            │
+      │  user submits                         │                            │
+      ├──────────────────────────────────────▶│                            │
+      │                                       │  mm.multi_factor_auth(...) │
+      │                                       ├───────────────────────────▶│
+      │                                       │◀────── session token ──────┤
+      │                                       │                            │
+      │                                       │ secure_session.save(token)
+      │                                       │        ├─▶ system keyring (primary)
+      │                                       │        └─▶ ~/.monarch-mcp-server/token (fallback)
+      │                                       │                            │
+      │   "Logged in. Session saved."         │                            │
+      │◀──────────────────────────────────────┤                            │
+```
+
+### Data tool flow (e.g. `get_accounts`)
+
+```
+  Claude Code ──▶ server.py ──▶ _get_client() ──▶ secure_session.load()
+                      │                                  │
+                      │                                  ▼
+                      │                         system keyring / file
+                      │                                  │
+                      │         ◀─── token ──────────────┘
+                      │
+                      │  MonarchMoney(token=...).get_accounts()
+                      ▼
+                 monarchmoneycommunity ──▶ GraphQL ──▶ Monarch API
+```
+
+If `secure_session.load()` returns no token, `_get_client()` raises `NotAuthenticated` and the tool returns `isError=true` with "Call `monarch_login` to authenticate."
+
+### Session storage
+
+Session tokens are persisted via the [`keyring`](https://pypi.org/project/keyring/) library:
+
+- **macOS** → Keychain
+- **Linux (GNOME/KDE)** → Secret Service (GNOME Keyring / KWallet)
+- **Windows** → Credential Manager
+- **Fallback** (headless / WSL / no backend) → `~/.monarch-mcp-server/token` with `0600` permissions in a `0700` directory
+
+No plaintext password is ever written to disk — only the rotating session token.
+
 ## Project structure
 
 ```
 monarch-mcp-server/
 ├── src/monarch_mcp_server/
 │   ├── __init__.py
-│   ├── server.py          # Tool definitions
-│   ├── auth.py            # Elicitation-based login
-│   └── secure_session.py  # Keyring + file fallback
+│   ├── server.py           # Tool definitions (20 tools: auth + data)
+│   ├── auth.py             # Elicitation-based login flow
+│   └── secure_session.py   # Keyring + file-fallback storage
+├── tests/
+│   ├── conftest.py         # Shared fixtures (mock MonarchMoney client)
+│   ├── test_tools.py       # Data tools + auth wrappers + _get_client
+│   ├── test_auth.py        # Elicitation login flow (happy, MFA, cancel)
+│   └── test_secure_session.py  # Keyring / file fallback / get-client
+├── .github/workflows/
+│   └── test.yml            # CI: pytest on Python 3.12 and 3.13
 ├── pyproject.toml
 ├── requirements.txt
 └── README.md
 ```
+
+## Development
+
+```bash
+# install with dev extras
+uv sync --extra dev
+
+# run tests
+uv run pytest tests/
+
+# run a single test file
+uv run pytest tests/test_auth.py -v
+```
+
+CI runs pytest on every push to `main` and every pull request.
 
 ## Acknowledgments
 

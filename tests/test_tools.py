@@ -1,12 +1,16 @@
 """Tests for Monarch MCP Server tools."""
 
 import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from monarch_mcp_server.server import (
+    NotAuthenticated,
+    _get_client,
     add_transaction_tag,
     categorize_transaction,
+    check_auth_status,
     create_transaction,
     create_transaction_category,
     create_transaction_tag,
@@ -18,6 +22,9 @@ from monarch_mcp_server.server import (
     get_transaction_category_groups,
     get_transaction_tags,
     get_transactions,
+    monarch_login,
+    monarch_login_with_token,
+    monarch_logout,
     refresh_accounts,
     set_transaction_tags,
     update_transaction,
@@ -452,3 +459,95 @@ class TestRefreshAccounts:
         mock_monarch_client.request_accounts_refresh.side_effect = Exception("Timeout")
         with pytest.raises(Exception, match="Timeout"):
             await refresh_accounts()
+
+
+# --- authentication surface ---------------------------------------------------
+#
+# The autouse `patch_monarch_client` fixture in conftest.py replaces
+# `server._get_client` with an always-succeeding mock. Tests below that need
+# to exercise the real `_get_client` raise-path or `check_auth_status` go
+# through the imported reference directly (bound at module import before the
+# autouse patch is applied per-test), or patch `secure_session` functions.
+
+
+class TestGetClient:
+    def test_raises_when_no_session(self):
+        with patch(
+            "monarch_mcp_server.server.secure_session.get_authenticated_client",
+            return_value=None,
+        ):
+            with pytest.raises(NotAuthenticated, match="monarch_login"):
+                _get_client()
+
+    def test_returns_client_when_session_present(self):
+        mock_client = MagicMock()
+        with patch(
+            "monarch_mcp_server.server.secure_session.get_authenticated_client",
+            return_value=mock_client,
+        ):
+            assert _get_client() is mock_client
+
+
+class TestCheckAuthStatus:
+    async def test_not_authenticated(self):
+        with patch(
+            "monarch_mcp_server.server.secure_session.load_token", return_value=None
+        ):
+            result = await check_auth_status()
+        assert "Not authenticated" in result
+        assert "monarch_login" in result
+
+    async def test_authenticated_and_live(self):
+        mock_mm = AsyncMock()
+        mock_mm.get_subscription_details = AsyncMock(return_value={"ok": True})
+        with patch(
+            "monarch_mcp_server.server.secure_session.load_token", return_value="tkn"
+        ), patch("monarch_mcp_server.server.MonarchMoney", return_value=mock_mm):
+            result = await check_auth_status()
+        assert "session is live" in result
+
+    async def test_token_present_but_invalid(self):
+        mock_mm = AsyncMock()
+        mock_mm.get_subscription_details = AsyncMock(side_effect=Exception("401"))
+        with patch(
+            "monarch_mcp_server.server.secure_session.load_token", return_value="tkn"
+        ), patch("monarch_mcp_server.server.MonarchMoney", return_value=mock_mm):
+            result = await check_auth_status()
+        assert "invalid" in result.lower()
+        assert "monarch_login" in result
+
+
+class TestAuthToolWrappers:
+    """The auth tools are thin delegates to `auth.py` — verify the wiring."""
+
+    async def test_monarch_login_delegates(self):
+        ctx = MagicMock()
+        with patch(
+            "monarch_mcp_server.server.auth.login_interactive",
+            new_callable=AsyncMock,
+            return_value="ok",
+        ) as mock_fn:
+            result = await monarch_login(ctx)
+        mock_fn.assert_awaited_once_with(ctx)
+        assert result == "ok"
+
+    async def test_monarch_login_with_token_delegates(self):
+        ctx = MagicMock()
+        with patch(
+            "monarch_mcp_server.server.auth.login_with_token_interactive",
+            new_callable=AsyncMock,
+            return_value="ok",
+        ) as mock_fn:
+            result = await monarch_login_with_token(ctx)
+        mock_fn.assert_awaited_once_with(ctx)
+        assert result == "ok"
+
+    async def test_monarch_logout_delegates(self):
+        with patch(
+            "monarch_mcp_server.server.auth.logout",
+            new_callable=AsyncMock,
+            return_value="cleared",
+        ) as mock_fn:
+            result = await monarch_logout()
+        mock_fn.assert_awaited_once_with()
+        assert result == "cleared"

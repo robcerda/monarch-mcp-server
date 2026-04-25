@@ -8,10 +8,11 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 import mcp.types as types
 from monarchmoney import MonarchMoney, RequireMFAException  # type: ignore
 from pydantic import BaseModel, Field
+from monarch_mcp_server import auth
 from monarch_mcp_server.secure_session import secure_session
 
 # Configure logging
@@ -146,6 +147,33 @@ def debug_session_loading() -> str:
 
         error_details = traceback.format_exc()
         return f"❌ Keyring access failed:\nError: {str(e)}\nType: {type(e)}\nTraceback:\n{error_details}"
+
+
+@mcp.tool()
+async def monarch_login(ctx: Context) -> str:
+    """Sign in to Monarch Money.
+
+    Opens a secure form in the client UI to collect email, password, and
+    (if required) an MFA code. Credentials never pass through the model —
+    they flow client-UI → server directly via the MCP protocol.
+    """
+    return await auth.login_interactive(ctx)
+
+
+@mcp.tool()
+async def monarch_login_with_token(ctx: Context) -> str:
+    """Sign in to Monarch Money using a browser-copied session token.
+
+    Useful for SSO users who can't use password login. Grab the token from
+    browser DevTools → Application → Local Storage → app.monarchmoney.com.
+    """
+    return await auth.login_with_token_interactive(ctx)
+
+
+@mcp.tool()
+async def monarch_logout() -> str:
+    """Clear the stored Monarch Money session from the system keyring."""
+    return await auth.logout()
 
 
 @mcp.tool()

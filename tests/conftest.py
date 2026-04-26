@@ -1,7 +1,15 @@
 """Shared test fixtures for Monarch MCP Server tests."""
 
 import json
-from unittest.mock import AsyncMock, patch
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
+
+# Mock the monarchmoney module before any monarch_mcp_server imports
+mm_mock = MagicMock()
+mm_mock.MonarchMoney = MagicMock
+mm_mock.RequireMFAException = Exception
+sys.modules.setdefault("monarchmoney", mm_mock)
+sys.modules.setdefault("monarchmoney.monarchmoney", MagicMock())
 
 import pytest
 
@@ -188,12 +196,38 @@ def mock_monarch_client():
     return client
 
 
+_TOOL_MODULES = [
+    "monarch_mcp_server.client",
+    "monarch_mcp_server.tools.auth",
+    "monarch_mcp_server.tools.accounts",
+    "monarch_mcp_server.tools.transactions",
+    "monarch_mcp_server.tools.summaries",
+    "monarch_mcp_server.tools.splits",
+    "monarch_mcp_server.tools.tags",
+    "monarch_mcp_server.tools.rules",
+    "monarch_mcp_server.tools.categories",
+    "monarch_mcp_server.tools.budgets",
+    "monarch_mcp_server.tools.financial",
+]
+
+
 @pytest.fixture(autouse=True)
 def patch_monarch_client(mock_monarch_client):
-    """Automatically patch get_monarch_client for all tests."""
-    with patch(
-        "monarch_mcp_server.server.get_monarch_client",
-        new_callable=AsyncMock,
-        return_value=mock_monarch_client,
-    ):
+    """Automatically patch get_monarch_client wherever it's imported."""
+    patchers = []
+    for module_path in _TOOL_MODULES:
+        try:
+            p = patch(
+                f"{module_path}.get_monarch_client",
+                new_callable=AsyncMock,
+                return_value=mock_monarch_client,
+            )
+            p.start()
+            patchers.append(p)
+        except (AttributeError, ModuleNotFoundError):
+            pass
+    try:
         yield mock_monarch_client
+    finally:
+        for p in patchers:
+            p.stop()

@@ -67,10 +67,12 @@ async def get_net_worth(
         client = await get_monarch_client()
 
         params: Dict[str, Any] = {}
+        # Pass ISO strings directly; upstream serializes via gql JSON and
+        # cannot handle datetime.date objects in GraphQL variables.
         if start_date:
-            params["start_date"] = dt.strptime(start_date, "%Y-%m-%d").date()
+            params["start_date"] = start_date
         if end_date:
-            params["end_date"] = dt.strptime(end_date, "%Y-%m-%d").date()
+            params["end_date"] = end_date
         if account_type:
             params["account_type"] = account_type
 
@@ -145,7 +147,9 @@ async def get_net_worth_by_account_type(
             timeframe=timeframe,
         )
 
-        account_types = result.get("accountTypeSnapshots", [])
+        # Upstream returns a flat list under key "snapshotsByAccountType"
+        # with shape [{"accountType": str, "month": "YYYY-MM" or "YYYY", "balance": float}, ...]
+        rows = result.get("snapshotsByAccountType", [])
 
         formatted: Dict[str, Any] = {
             "timeframe": timeframe,
@@ -153,21 +157,21 @@ async def get_net_worth_by_account_type(
             "account_types": []
         }
 
-        for acct_type in account_types:
-            type_info: Dict[str, Any] = {
-                "type": acct_type.get("accountType"),
-                "snapshots": []
-            }
+        # Group flat rows by accountType, preserving order of first appearance.
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            atype = row.get("accountType")
+            if atype is None:
+                continue
+            entry = grouped.setdefault(atype, {"type": atype, "snapshots": []})
+            entry["snapshots"].append({
+                "month": row.get("month"),
+                "balance": row.get("balance"),
+            })
 
-            for snapshot in acct_type.get("snapshots", []):
-                type_info["snapshots"].append({
-                    "month": snapshot.get("month"),
-                    "balance": snapshot.get("balance"),
-                })
-
+        for type_info in grouped.values():
             if type_info["snapshots"]:
                 type_info["current_balance"] = type_info["snapshots"][-1].get("balance", 0)
-
             formatted["account_types"].append(type_info)
 
         total = sum(

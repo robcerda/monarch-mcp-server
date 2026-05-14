@@ -239,6 +239,7 @@ _TOOL_MODULES = [
     "monarch_mcp_server.tools.categories",
     "monarch_mcp_server.tools.budgets",
     "monarch_mcp_server.tools.financial",
+    "monarch_mcp_server.tools.merchants",
 ]
 
 

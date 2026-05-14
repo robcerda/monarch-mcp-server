@@ -206,6 +206,11 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 - **Update Transaction Rule**: Modify existing rules
 - **Delete Transaction Rule**: Remove a rule
 
+### 🔄 Merchant & Recurring Stream Management
+- **Get Merchant**: View a merchant's details including recurring transaction stream configuration
+- **Update Merchant**: Modify a merchant's name and/or recurring stream settings (frequency, amount, base date)
+- **Review Recurring Stream**: Accept, ignore, or reset recurring transaction streams detected by Monarch
+
 ### ✂️ Transaction Splits
 - **Get Transaction Splits**: View how a transaction has been split into parts
 - **Split Transaction**: Divide a single transaction into multiple parts with different categories or merchants
@@ -267,6 +272,9 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 | `create_transaction_rule` | Create an auto-categorization rule | `merchant_criteria_operator`, `merchant_criteria_value`, `set_category_id`, `add_tag_ids`, `amount_operator`, `amount_value` |
 | `update_transaction_rule` | Update an existing rule | `rule_id`, `merchant_criteria_operator`, `merchant_criteria_value`, `set_category_id` |
 | `delete_transaction_rule` | Delete a rule | `rule_id` |
+| `get_merchant` | Get merchant details with recurring stream | `merchant_id` |
+| `update_merchant` | Update merchant name/recurring stream | `merchant_id`, `name`, `is_recurring`, `frequency`, `base_date`, `amount`, `is_active` |
+| `review_recurring_stream` | Set recurring stream review status | `stream_id`, `review_status` |
 | `get_transaction_splits` | Get splits for a transaction | `transaction_id` |
 | `split_transaction` | Split a transaction into parts | `transaction_id`, `splits` (JSON array) |
 | `get_transactions_summary` | Get high-level transaction statistics | None |
@@ -371,6 +379,16 @@ Give me a quick summary of my transactions using get_transactions_summary
 Show my spending breakdown by category for last month using get_spending_summary
 ```
 
+### Update a Recurring Bill Amount
+```
+Update PennyMac's recurring stream to $1,460.93 monthly using update_merchant
+```
+
+### Review Recurring Streams
+```
+Approve the Netflix recurring stream using review_recurring_stream
+```
+
 ## 📅 Date Formats
 
 - All dates should be in `YYYY-MM-DD` format (e.g., "2024-01-15")
@@ -432,7 +450,7 @@ monarch-mcp-server/
 
 ### Recommended: require approval for mutating tools
 
-Several tools mutate your Monarch ledger (`create_transaction`, `update_transaction`, `delete_transaction`, `bulk_categorize_transactions`, `upload_account_balance_history`, `set_transaction_tags`, `create_transaction_rule`, `update_transaction_rule`, `delete_transaction_rule`, `split_transaction`, `set_budget_amount`).
+Several tools mutate your Monarch ledger (`create_transaction`, `update_transaction`, `delete_transaction`, `bulk_categorize_transactions`, `upload_account_balance_history`, `set_transaction_tags`, `create_transaction_rule`, `update_transaction_rule`, `delete_transaction_rule`, `split_transaction`, `set_budget_amount`, `update_merchant`, `review_recurring_stream`).
 
 Because the LLM can be influenced by data it reads back (a malicious-looking memo or merchant name in a transaction), the safest setup is to configure your MCP client to require manual approval before any mutating tool runs. In Claude Desktop and Claude Code this is the default behavior for unknown tools; keep it that way for the tools listed above rather than allow-listing them.
 

@@ -1,13 +1,94 @@
 """Transaction summary tools."""
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from gql import gql
 
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
-from monarch_mcp_server.helpers import json_success, json_error
+from monarch_mcp_server.helpers import json_error, json_success
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# GraphQL constants
+# ---------------------------------------------------------------------------
+
+GET_CASHFLOW_ENTITY_AGGREGATES_QUERY = gql(
+    """
+query Common_GetCashFlowEntityAggregates($filters: TransactionFilterInput) {
+  byCategory: aggregates(filters: $filters, groupBy: ["category"]) {
+    groupBy {
+      category {
+        id
+        name
+        icon
+        group {
+          id
+          type
+          __typename
+        }
+        __typename
+      }
+      __typename
+    }
+    summary {
+      sum
+      __typename
+    }
+    __typename
+  }
+  byCategoryGroup: aggregates(filters: $filters, groupBy: ["categoryGroup"]) {
+    groupBy {
+      categoryGroup {
+        id
+        name
+        type
+        __typename
+      }
+      __typename
+    }
+    summary {
+      sum
+      __typename
+    }
+    __typename
+  }
+  byMerchant: aggregates(filters: $filters, groupBy: ["merchant"]) {
+    groupBy {
+      merchant {
+        id
+        name
+        logoUrl
+        __typename
+      }
+      __typename
+    }
+    summary {
+      sumIncome
+      sumExpense
+      __typename
+    }
+    __typename
+  }
+  summary: aggregates(filters: $filters, fillEmptyValues: true) {
+    summary {
+      sumIncome
+      sumExpense
+      savings
+      savingsRate
+      __typename
+    }
+    __typename
+  }
+}
+"""
+)
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
 
 
 @mcp.tool()
@@ -33,72 +114,106 @@ async def get_transactions_summary() -> str:
 async def get_spending_summary(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit: int = 100,
 ) -> str:
     """
-    Get a spending summary broken down by category.
+    Get a spending summary broken down by category, category group, and merchant.
 
-    Shows how much you've spent in each category over a time period.
-    Great for understanding where your money is going.
+    Shows how much you've spent in each category over a time period, plus
+    overall income, expenses, and savings rate.
 
     Args:
-        start_date: Start date in YYYY-MM-DD format
-        end_date: End date in YYYY-MM-DD format
-        limit: Maximum number of categories to return (default: 100)
+        start_date: Start date in YYYY-MM-DD format.
+        end_date: End date in YYYY-MM-DD format.
 
     Returns:
-        Spending breakdown by category with totals.
+        Spending breakdown with by_category, by_category_group, by_merchant,
+        and overall totals (income, expenses, savings, savings_rate).
 
     Examples:
         Get spending summary for current month:
-            get_spending_summary(start_date="2024-02-01", end_date="2024-02-29")
+            get_spending_summary(start_date="2026-05-01", end_date="2026-05-31")
 
         Get spending summary for the year:
-            get_spending_summary(start_date="2024-01-01")
+            get_spending_summary(start_date="2026-01-01", end_date="2026-12-31")
     """
     try:
         client = await get_monarch_client()
 
-        params: Dict[str, Any] = {"limit": limit}
+        filters: Dict[str, Any] = {}
         if start_date:
-            params["start_date"] = start_date
+            filters["startDate"] = start_date
         if end_date:
-            params["end_date"] = end_date
+            filters["endDate"] = end_date
 
-        result = await client.get_cashflow_summary(**params)
+        result = await client.gql_call(
+            operation="Common_GetCashFlowEntityAggregates",
+            graphql_query=GET_CASHFLOW_ENTITY_AGGREGATES_QUERY,
+            variables={"filters": filters},
+        )
 
-        summary = result.get("summary", [])
+        by_category: List[Dict[str, Any]] = []
+        for item in result.get("byCategory", []):
+            cat = item.get("groupBy", {}).get("category") or {}
+            group = cat.get("group") or {}
+            by_category.append(
+                {
+                    "category": cat.get("name"),
+                    "category_id": cat.get("id"),
+                    "icon": cat.get("icon"),
+                    "group_id": group.get("id"),
+                    "group_type": group.get("type"),
+                    "sum": item.get("summary", {}).get("sum", 0),
+                }
+            )
+        by_category.sort(key=lambda x: abs(x.get("sum", 0)), reverse=True)
+
+        by_category_group: List[Dict[str, Any]] = []
+        for item in result.get("byCategoryGroup", []):
+            grp = item.get("groupBy", {}).get("categoryGroup") or {}
+            by_category_group.append(
+                {
+                    "group": grp.get("name"),
+                    "group_id": grp.get("id"),
+                    "group_type": grp.get("type"),
+                    "sum": item.get("summary", {}).get("sum", 0),
+                }
+            )
+        by_category_group.sort(key=lambda x: abs(x.get("sum", 0)), reverse=True)
+
+        by_merchant: List[Dict[str, Any]] = []
+        for item in result.get("byMerchant", []):
+            merch = item.get("groupBy", {}).get("merchant") or {}
+            by_merchant.append(
+                {
+                    "merchant": merch.get("name"),
+                    "merchant_id": merch.get("id"),
+                    "income": item.get("summary", {}).get("sumIncome", 0),
+                    "expense": item.get("summary", {}).get("sumExpense", 0),
+                }
+            )
+        by_merchant.sort(key=lambda x: abs(x.get("expense", 0)), reverse=True)
+
+        overall = {}
+        summary_items = result.get("summary", [])
+        if summary_items:
+            s = summary_items[0].get("summary", {})
+            overall = {
+                "total_income": s.get("sumIncome", 0),
+                "total_expenses": s.get("sumExpense", 0),
+                "savings": s.get("savings", 0),
+                "savings_rate": s.get("savingsRate", 0),
+            }
 
         formatted: Dict[str, Any] = {
             "period": {
                 "start_date": start_date,
                 "end_date": end_date,
             },
-            "total_income": 0,
-            "total_expenses": 0,
-            "net": 0,
-            "by_category": []
+            **overall,
+            "by_category": by_category,
+            "by_category_group": by_category_group,
+            "by_merchant": by_merchant,
         }
-
-        for item in summary:
-            category_info = {
-                "category": item.get("category", {}).get("name") if item.get("category") else "Uncategorized",
-                "category_id": item.get("category", {}).get("id") if item.get("category") else None,
-                "group": item.get("categoryGroup", {}).get("name") if item.get("categoryGroup") else None,
-                "sum": item.get("sum", 0),
-                "avg": item.get("avg", 0),
-            }
-            formatted["by_category"].append(category_info)
-
-            amount = item.get("sum", 0)
-            if amount > 0:
-                formatted["total_income"] += amount
-            else:
-                formatted["total_expenses"] += abs(amount)
-
-        formatted["net"] = formatted["total_income"] - formatted["total_expenses"]
-
-        formatted["by_category"].sort(key=lambda x: abs(x.get("sum", 0)), reverse=True)
 
         return json_success(formatted)
     except Exception as e:

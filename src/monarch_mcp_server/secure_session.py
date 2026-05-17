@@ -5,22 +5,27 @@ Uses the system keyring when available, with an automatic file-based
 fallback for environments without a keyring backend (e.g. WSL, headless Linux).
 """
 
+import json
 import logging
 import os
 import stat
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 from monarchmoney import MonarchMoney
+
+from monarch_mcp_server.cookie_auth import MonarchMoneyCookieAuth
 
 logger = logging.getLogger(__name__)
 
 # Keyring service identifiers
 KEYRING_SERVICE = "com.mcp.monarch-mcp-server"
 KEYRING_USERNAME = "monarch-token"
+KEYRING_USERNAME_COOKIES = "monarch-cookies"
 
 # File-based fallback location
 _TOKEN_DIR = Path.home() / ".monarch-mcp-server"
 _TOKEN_FILE = _TOKEN_DIR / "token"
+_COOKIES_FILE = _TOKEN_DIR / "cookies.json"
 
 
 def _keyring_available() -> bool:
@@ -92,6 +97,34 @@ class SecureMonarchSession:
         if _TOKEN_DIR.is_dir() and not list(_TOKEN_DIR.iterdir()):
             _TOKEN_DIR.rmdir()
 
+    def _save_cookies_file(self, session_id: str, csrftoken: str) -> None:
+        _TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({"session_id": session_id, "csrftoken": csrftoken})
+        _COOKIES_FILE.write_text(payload)
+        _COOKIES_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 600
+        _TOKEN_DIR.chmod(stat.S_IRWXU)  # 700
+        logger.info(f"✅ Cookies saved to {_COOKIES_FILE}")
+
+    def _load_cookies_file(self) -> Optional[Tuple[str, str]]:
+        if _COOKIES_FILE.is_file():
+            try:
+                data = json.loads(_COOKIES_FILE.read_text())
+                sid = data.get("session_id", "").strip()
+                csrf = data.get("csrftoken", "").strip()
+                if sid and csrf:
+                    logger.info(f"✅ Cookies loaded from {_COOKIES_FILE}")
+                    return sid, csrf
+            except Exception as e:
+                logger.warning(f"⚠️  Cookie file unreadable: {e}")
+        return None
+
+    def _delete_cookies_file(self) -> None:
+        if _COOKIES_FILE.is_file():
+            _COOKIES_FILE.unlink()
+            logger.info(f"🗑️ Cookies file deleted: {_COOKIES_FILE}")
+        if _TOKEN_DIR.is_dir() and not list(_TOKEN_DIR.iterdir()):
+            _TOKEN_DIR.rmdir()
+
     # -- public API ----------------------------------------------------------
 
     def save_token(self, token: str) -> None:
@@ -131,8 +164,7 @@ class SecureMonarchSession:
         return None
 
     def delete_token(self) -> None:
-        """Delete the authentication token from all storage backends."""
-        # Try keyring
+        """Delete the authentication token and cookies from all storage backends."""
         if self._use_keyring:
             try:
                 import keyring
@@ -140,13 +172,65 @@ class SecureMonarchSession:
                 logger.info("🗑️ Token deleted from keyring")
             except Exception:
                 pass
+            try:
+                import keyring
+                keyring.delete_password(KEYRING_SERVICE, KEYRING_USERNAME_COOKIES)
+                logger.info("🗑️ Cookies deleted from keyring")
+            except Exception:
+                pass
 
-        # Always try file cleanup too
         self._delete_token_file()
+        self._delete_cookies_file()
         self._cleanup_old_session_files()
 
+    def save_cookies(self, session_id: str, csrftoken: str) -> None:
+        """Save session_id + csrftoken cookies to keyring or file fallback."""
+        if self._use_keyring:
+            try:
+                import keyring
+                payload = json.dumps({"session_id": session_id, "csrftoken": csrftoken})
+                keyring.set_password(KEYRING_SERVICE, KEYRING_USERNAME_COOKIES, payload)
+                logger.info("✅ Cookies saved securely to keyring")
+                return
+            except Exception as e:
+                logger.warning(f"⚠️  Keyring save failed, falling back to file: {e}")
+
+        self._save_cookies_file(session_id, csrftoken)
+
+    def load_cookies(self) -> Optional[Tuple[str, str]]:
+        """Load session_id + csrftoken from keyring or file fallback."""
+        if self._use_keyring:
+            try:
+                import keyring
+                payload = keyring.get_password(KEYRING_SERVICE, KEYRING_USERNAME_COOKIES)
+                if payload:
+                    data = json.loads(payload)
+                    sid = data.get("session_id", "").strip()
+                    csrf = data.get("csrftoken", "").strip()
+                    if sid and csrf:
+                        logger.info("✅ Cookies loaded from keyring")
+                        return sid, csrf
+            except Exception as e:
+                logger.warning(f"⚠️  Keyring cookie load failed, trying file: {e}")
+
+        return self._load_cookies_file()
+
     def get_authenticated_client(self) -> Optional[MonarchMoney]:
-        """Get an authenticated MonarchMoney client."""
+        """Get an authenticated MonarchMoney client.
+
+        Prefers cookie-based auth (Monarch's current model) and falls back to
+        the legacy token if no cookies are stored.
+        """
+        cookies = self.load_cookies()
+        if cookies:
+            try:
+                sid, csrf = cookies
+                client = MonarchMoneyCookieAuth(session_id=sid, csrftoken=csrf)
+                logger.info("✅ MonarchMoney client created with stored cookies")
+                return client
+            except Exception as e:
+                logger.error(f"❌ Failed to create cookie-auth client: {e}")
+
         token = self.load_token()
         if not token:
             return None
@@ -161,10 +245,12 @@ class SecureMonarchSession:
 
     def save_authenticated_session(self, mm: MonarchMoney) -> None:
         """Save the session from an authenticated MonarchMoney instance."""
-        if mm.token:
+        if isinstance(mm, MonarchMoneyCookieAuth):
+            self.save_cookies(mm._session_id, mm._csrftoken)
+        elif mm.token:
             self.save_token(mm.token)
         else:
-            logger.warning("⚠️  MonarchMoney instance has no token to save")
+            logger.warning("⚠️  MonarchMoney instance has no token or cookies to save")
 
     def _cleanup_old_session_files(self) -> None:
         """Clean up old insecure session files."""

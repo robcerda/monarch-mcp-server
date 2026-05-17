@@ -19,6 +19,7 @@ sys.path.insert(0, str(src_path))
 
 from monarchmoney import MonarchMoney, RequireMFAException
 from dotenv import load_dotenv
+from monarch_mcp_server.cookie_auth import MonarchMoneyCookieAuth
 from monarch_mcp_server.secure_session import secure_session
 
 async def main():
@@ -42,38 +43,34 @@ async def main():
         # Clear any existing sessions (both old pickle files and keyring)
         secure_session.delete_token()
         print("🗑️ Cleared existing secure sessions")
-        
-        # Ask about MFA setup
-        print("\n🔐 Security Check:")
-        has_mfa = input("Do you have MFA (Multi-Factor Authentication) enabled on your Monarch Money account? (y/n): ").strip().lower()
-        
-        if has_mfa not in ['y', 'yes']:
-            print("\n⚠️  SECURITY RECOMMENDATION:")
-            print("=" * 50)
-            print("You should enable MFA for your Monarch Money account.")
-            print("MFA adds an extra layer of security to protect your financial data.")
-            print("\nTo enable MFA:")
-            print("1. Log into Monarch Money at https://monarchmoney.com")
-            print("2. Go to Settings → Security")
-            print("3. Enable Two-Factor Authentication")
-            print("4. Follow the setup instructions\n")
-            
-            proceed = input("Continue with login anyway? (y/n): ").strip().lower()
-            if proceed not in ['y', 'yes']:
-                print("Login cancelled. Please set up MFA and try again.")
-                return
-        
-        print("\nStarting login...")
-        print("\nHow do you sign in to Monarch Money?")
-        print("  1) Email and password")
-        print("  2) Google / SSO (single sign-on)")
-        login_method = input("Choice (1 or 2): ").strip()
 
-        if login_method == "2":
+        print("\nHow do you sign in to Monarch Money?")
+        print("  1) Session cookies from browser  (recommended — required since May 2026)")
+        print("  2) Email and password            (currently broken — Monarch dropped Token auth)")
+        print("  3) Legacy session token paste    (currently broken — see above)")
+        login_method = input("Choice [1]: ").strip() or "1"
+
+        if login_method == "1":
+            print("\n📋 To get your session cookies from the browser:")
+            print("  1. Log in to https://app.monarch.com in Chrome/Firefox")
+            print("  2. Open DevTools (F12) → Application tab → Cookies")
+            print("     → https://app.monarch.com")
+            print("  3. Copy the Value of 'session_id' (HttpOnly) and 'csrftoken'")
+            session_id = getpass.getpass("\nPaste session_id value: ").strip()
+            if not session_id:
+                print("❌ No session_id provided. Exiting.")
+                return
+            csrftoken = getpass.getpass("Paste csrftoken value: ").strip()
+            if not csrftoken:
+                print("❌ No csrftoken provided. Exiting.")
+                return
+            mm = MonarchMoneyCookieAuth(session_id=session_id, csrftoken=csrftoken)
+            print("✅ Cookies set")
+        elif login_method == "3":
             print("\n📋 To get your session token from the browser:")
-            print("  1. Log in to https://app.monarchmoney.com in Chrome/Firefox")
+            print("  1. Log in to https://app.monarch.com in Chrome/Firefox")
             print("  2. Open DevTools (F12) → Application tab → Local Storage")
-            print("     → https://app.monarchmoney.com")
+            print("     → https://app.monarch.com")
             print("  3. Copy the value for the key 'token'")
             print("     (Alternatively: DevTools → Network tab, filter any request,")
             print("      look for 'Authorization: Token <value>' in request headers)")
@@ -81,27 +78,40 @@ async def main():
             if not token:
                 print("❌ No token provided. Exiting.")
                 return
-            # Re-initialize with the token so the Authorization header is set correctly.
-            # set_token() only stores the value but does not update _headers.
             mm = MonarchMoney(token=token)
             print("✅ Token set")
         else:
+            print("\n🔐 Security Check:")
+            has_mfa = input(
+                "Do you have MFA (Multi-Factor Authentication) enabled on your Monarch Money account? (y/n): "
+            ).strip().lower()
+            if has_mfa not in ['y', 'yes']:
+                print("\n⚠️  SECURITY RECOMMENDATION:")
+                print("=" * 50)
+                print("You should enable MFA for your Monarch Money account.")
+                print("MFA adds an extra layer of security to protect your financial data.")
+                print("\nTo enable MFA:")
+                print("1. Log into Monarch Money at https://monarchmoney.com")
+                print("2. Go to Settings → Security")
+                print("3. Enable Two-Factor Authentication")
+                print("4. Follow the setup instructions\n")
+                proceed = input("Continue with login anyway? (y/n): ").strip().lower()
+                if proceed not in ['y', 'yes']:
+                    print("Login cancelled. Please set up MFA and try again.")
+                    return
+
             email = input("Email: ")
             password = getpass.getpass("Password: ")
 
-            # Try login without MFA first
             try:
                 await mm.login(email, password, use_saved_session=False, save_session=True)
                 print("✅ Login successful!")
-
             except RequireMFAException:
                 print("🔐 MFA code required")
                 mfa_code = input("Two Factor Code: ")
-
-                # Use the same instance for MFA
                 await mm.multi_factor_authenticate(email, password, mfa_code)
                 print("✅ MFA authentication successful")
-                mm.save_session()  # Manually save the session
+                mm.save_session()
         
         # Test the connection first
         print("\nTesting connection...")

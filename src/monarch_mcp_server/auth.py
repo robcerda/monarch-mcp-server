@@ -10,6 +10,7 @@ from mcp.server.fastmcp import Context
 from monarchmoney import MonarchMoney, RequireMFAException
 from pydantic import BaseModel, Field
 
+from monarch_mcp_server.cookie_auth import MonarchMoneyCookieAuth
 from monarch_mcp_server.secure_session import secure_session
 
 
@@ -41,6 +42,21 @@ class TokenForm(BaseModel):
         description=(
             "Monarch Money session token. Grab it from browser DevTools → "
             "Application → Local Storage for app.monarchmoney.com, key 'token'."
+        ),
+    )
+
+
+class CookiesForm(BaseModel):
+    session_id: str = Field(
+        description=(
+            "Monarch session_id cookie (HttpOnly). DevTools → Application → "
+            "Cookies → https://app.monarch.com → row 'session_id', copy Value."
+        ),
+    )
+    csrftoken: str = Field(
+        description=(
+            "Monarch csrftoken cookie. Same Cookies pane, row 'csrftoken', "
+            "copy Value."
         ),
     )
 
@@ -92,6 +108,31 @@ async def login_with_token_interactive(ctx: Context) -> str:
     await mm.get_subscription_details()
     secure_session.save_token(token)
     return "Session token saved to system keyring."
+
+
+async def login_with_cookies_interactive(ctx: Context) -> str:
+    if not _elicit_supported(ctx):
+        return _UPGRADE_HINT
+    form_result = await ctx.elicit(
+        message=(
+            "Paste your Monarch session cookies. From DevTools → Application "
+            "→ Cookies → https://app.monarch.com, copy the Value of "
+            "'session_id' (HttpOnly) and 'csrftoken'."
+        ),
+        schema=CookiesForm,
+    )
+    if form_result.action != "accept":
+        return "Login cancelled."
+
+    sid = form_result.data.session_id.strip()
+    csrf = form_result.data.csrftoken.strip()
+    if not sid or not csrf:
+        return "Empty cookie value — aborting."
+
+    mm = MonarchMoneyCookieAuth(session_id=sid, csrftoken=csrf)
+    await mm.get_subscription_details()
+    secure_session.save_cookies(sid, csrf)
+    return "Session cookies saved to system keyring."
 
 
 async def logout() -> str:

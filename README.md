@@ -5,6 +5,8 @@
 A Model Context Protocol (MCP) server for integrating with the Monarch Money personal finance platform. This server provides seamless access to your financial accounts, transactions, budgets, and analytics through Claude Desktop and Claude Code.
 
 > **🔒 Hardened build (read-only by default).** As of the read-only hardening change, the server refuses all Monarch data mutations unless the operator explicitly opts in, and the MCP-exposed login/logout tools are permanently disabled. See [🔒 Security model](#-security-model) before configuring a client.
+>
+> **🍪 Cookie auth required (May 2026).** Monarch's API now authenticates with session cookies (`session_id` HttpOnly + `csrftoken`) plus an `x-csrftoken` request header. The legacy `Authorization: Token` header is rejected, so the old email/password and SSO-token paths in `login_setup.py` will not authenticate until upstream restores Token support. Use the cookie option.
 
 My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_source=share
 
@@ -152,21 +154,24 @@ These steps install the **hardened, read-only-by-default** branch into a local v
 
 ### 2. One-Time Authentication Setup (Terminal Only)
 
-> **⚠️ Never paste your Monarch email, password, MFA code, or session
-> token into a Claude chat.** The hardened build's MCP-exposed login tools
-> (`monarch_login`, `monarch_login_with_token`, `monarch_logout`) are
-> **permanently disabled** and return a refusal payload — they cannot
-> accept credentials over MCP transport regardless of any setting. Auth
-> happens only in a local terminal via `login_setup.py`.
+> **⚠️ Never paste your Monarch email, password, MFA code, session token,
+> or session cookies into a Claude chat.** The hardened build's
+> MCP-exposed login tools (`monarch_login`, `monarch_login_with_token`,
+> `monarch_logout`) are **permanently disabled** and return a refusal
+> payload — they cannot accept credentials over MCP transport regardless
+> of any setting. Auth happens only in a local terminal via
+> `login_setup.py`.
 
 The standalone script reads input directly from your terminal (via
-`input()` / `getpass.getpass()`), authenticates against Monarch in your
-local Python process, and stores the resulting **session token** in the
-system keyring. The MCP server then reads the token from the keyring on
-each call. Your email and password are never written to disk and never
-flow through MCP.
+`input()` / `getpass.getpass()`) and stores the resulting **session
+cookies** (`session_id` + `csrftoken`) in the system keyring. The MCP
+server then reads the cookies from the keyring on each call and sends
+them on every GraphQL request, along with an `x-csrftoken` header that
+mirrors the cookie value. Your email, password, MFA code, and the
+cookies themselves are never written to a `.env`, never read from the
+environment by the server, and never flow through MCP.
 
-#### Option A: Email / Password (with MFA if enabled)
+#### Option A: Session cookies (recommended — required since May 2026)
 
 Open Terminal on the same machine where you installed the server:
 
@@ -184,30 +189,39 @@ uv run python login_setup.py
 ```
 
 Follow the prompts in the terminal window:
-- Choose option `1` for email/password.
-- Enter your Monarch Money email and password.
-- Provide the MFA code if you have MFA enabled (you should).
-- A session token is saved to the macOS Keychain (or `~/.monarch-mcp-server/token` on systems with no keyring backend).
+- Choose option `1` (session cookies — the default).
+- In Chrome or Firefox, sign in to `https://app.monarch.com`.
+- Open DevTools (F12) → **Application** tab → **Cookies** → `https://app.monarch.com`.
+- Copy the **Value** of the `session_id` cookie (marked HttpOnly).
+- Copy the **Value** of the `csrftoken` cookie.
+- Paste each value at the prompts (input is hidden via `getpass`).
+- The cookies are saved to the macOS Keychain (or `~/.monarch-mcp-server/cookies.json` on systems with no keyring backend, mode `0600`).
 
-#### Option B: Paste a Browser Session Token (SSO / Google sign-in)
+The MCP server picks up the cookies on its next call and authenticates by
+sending them on every GraphQL request, along with an `x-csrftoken` header
+that mirrors the `csrftoken` cookie. This matches what Monarch's web app
+does after the May 2026 API change.
 
-If you sign in to Monarch with Google or another SSO provider, password
-login does not work. Instead, copy a token from your browser:
+#### Option B: Legacy email/password or session token (currently broken)
 
-1. Sign in to `https://app.monarchmoney.com` in Chrome or Firefox.
-2. Open DevTools → **Application** tab → **Local Storage** → `https://app.monarchmoney.com`.
-3. Copy the value of the `token` key.
-4. In the terminal, run `python login_setup.py` and choose option `2`.
-5. Paste the token at the prompt (the input is hidden via `getpass`).
+Options `2` (email/password) and `3` (legacy session token paste) remain
+in `login_setup.py` for forward compatibility, but they will **not**
+authenticate today: Monarch's API rejects the `Authorization: Token` flow
+that those paths produce. The script labels them as broken in the menu
+and gates them behind an extra confirmation. Use Option A above.
 
-The token is stored the same way as in Option A.
+If you previously logged in via one of these paths and your stored token
+has now started returning 401, re-run `login_setup.py` and switch to
+Option A.
 
 #### Rotating or clearing the stored session
 
-Re-run `python login_setup.py` to overwrite the stored token, or delete
-the macOS Keychain entry named `com.mcp.monarch-mcp-server` (Keychain
-Access app → search → delete) to clear it. The MCP server never modifies
-the stored session.
+Re-run `python login_setup.py` to overwrite the stored cookies, or delete
+the macOS Keychain entries `com.mcp.monarch-mcp-server` /
+`monarch-cookies` (and the legacy `monarch-token`) via Keychain Access →
+search → delete. On the file-fallback path, remove
+`~/.monarch-mcp-server/cookies.json` (and the legacy `token`). The MCP
+server never modifies the stored session.
 
 ### 3. Start Using
 
@@ -359,11 +373,11 @@ last line of defense.
 - **Get Spending Summary**: Spending breakdown by category with totals
 
 ### 🔐 Secure Authentication
-- **One-Time Setup**: Authenticate once in a terminal, use for weeks/months
-- **MFA Support**: Full support for two-factor authentication
-- **SSO/Google sign-in**: Paste a browser session token via `login_setup.py` (the MCP `monarch_login_with_token` tool is disabled)
-- **Session Persistence**: No need to re-authenticate frequently
-- **Secure**: Credentials never pass through Claude or any MCP tool
+- **Cookie-based auth (May 2026 API)**: Paste `session_id` + `csrftoken` browser cookies in a terminal via `login_setup.py`; the server sends them on every GraphQL request along with an `x-csrftoken` header.
+- **One-Time Setup**: Authenticate once in a terminal, use for weeks/months until the cookies expire.
+- **SSO/Google sign-in**: Works the same way — sign in to `app.monarch.com` in your browser, then copy the cookies.
+- **Session Persistence**: No need to re-authenticate frequently.
+- **Secure**: Credentials and cookies never pass through Claude or any MCP tool. The MCP `monarch_login` / `monarch_login_with_token` / `monarch_logout` tools are permanently disabled.
 
 ## 🛠️ Available Tools
 
@@ -513,16 +527,21 @@ Show my spending breakdown by category for last month using get_spending_summary
 ## 🔧 Troubleshooting
 
 ### Authentication Issues
-If you see "Authentication needed" errors:
+If you see "Authentication needed" or 401 errors:
 1. Run the setup command: `cd /path/to/your/monarch-mcp-server && python login_setup.py` (or `uv run python login_setup.py`)
-2. Restart Claude Desktop or Claude Code
-3. Try using a tool like `get_accounts`
+2. Choose option `1` (session cookies) and paste fresh `session_id` and `csrftoken` values from your browser.
+3. Restart Claude Desktop or Claude Code
+4. Try using a tool like `get_accounts`
 
-### Session Expired
-Sessions last for weeks, but if expired:
+### Session Expired or 401 after upgrade
+Cookies last for weeks, but if expired or if you upgraded from a build
+that used the legacy `Authorization: Token` flow:
 1. Run the same setup command again: `python login_setup.py` (or `uv run python login_setup.py`)
-2. Enter your credentials and 2FA code
-3. Session will be refreshed automatically
+2. Choose option `1` (session cookies) — do not pick option 2 or 3, they currently fail with the upstream API.
+3. Paste fresh `session_id` and `csrftoken` values.
+
+`check_auth_status` will warn explicitly when only a legacy token is
+stored — that is the cue to re-run `login_setup.py` and switch to cookies.
 
 ### `read_only: true` in a tool response
 You called a mutation tool (e.g. `create_transaction`) while the server
@@ -535,7 +554,8 @@ These three tools are permanently disabled. Authenticate from a terminal
 with `python login_setup.py` instead. There is no flag to re-enable them.
 
 ### Common Error Messages
-- **"No Monarch session token available"**: Run `python login_setup.py` (or `uv run python login_setup.py`) in a terminal on the same machine.
+- **"No Monarch session token available"** or 401 from any tool: Run `python login_setup.py` (or `uv run python login_setup.py`) in a terminal on the same machine and pick option 1 (session cookies).
+- **`check_auth_status` warns "Only a legacy session token is stored"**: Monarch's API rejected your legacy token. Re-run `login_setup.py` and switch to option 1 (cookies).
 - **"Invalid account ID"**: Use `get_accounts` to see valid account IDs.
 - **"Date format error"**: Use YYYY-MM-DD format for dates.
 
@@ -554,13 +574,17 @@ monarch-mcp-server/
 ```
 
 ### Session Management
-- Session **tokens** (not passwords) are stored in the system keyring:
-  - macOS: Keychain, service `com.mcp.monarch-mcp-server`, account `monarch-token`
-  - Linux without a keyring backend: file fallback at `~/.monarch-mcp-server/token`, mode `0600`
-- Tokens persist across Claude Desktop and Claude Code restarts.
-- The MCP server only reads the token; it never writes or deletes it.
-- Re-run `python login_setup.py` to rotate the token or to recover from
-  an expired session.
+- Session **cookies** (not passwords) are stored in the system keyring:
+  - macOS: Keychain, service `com.mcp.monarch-mcp-server`, accounts
+    `monarch-cookies` (current) and `monarch-token` (legacy).
+  - Linux without a keyring backend: file fallback at
+    `~/.monarch-mcp-server/cookies.json` (current) and
+    `~/.monarch-mcp-server/token` (legacy), both mode `0600`.
+- Cookies and tokens persist across Claude Desktop and Claude Code restarts.
+- The MCP server only reads them; it never writes or deletes them
+  (the auth-mutation MCP tools are disabled).
+- Re-run `python login_setup.py` to rotate cookies or to recover from an
+  expired session.
 
 ### Security Features
 - **Read-only by default** — see [🔒 Security model](#-security-model).
@@ -582,9 +606,10 @@ flipping the flag.
 
 ## 🧪 Running the tests
 
-The hardened build ships with 181 tests, including 39 that prove each
-mutation tool refuses in read-only mode and 17 that prove the MCP auth
-tools are hard-disabled and the env-credential / dotenv loaders are gone.
+The hardened build ships with a test suite that proves each mutation
+tool refuses in read-only mode, that the MCP auth tools are
+hard-disabled, that the env-credential / dotenv loaders are gone, and
+that the cookie-auth path is wired into the secure session store.
 
 From the repo root, with the venv from step 2 of installation active:
 
@@ -623,6 +648,24 @@ print(json.dumps(json.loads(out), indent=2))
 
 You should see `read_only: true` and `success: false` — and no network
 call is made because the keyring lookup is bypassed by the refusal.
+
+You can also exercise the cookie store directly without hitting Monarch:
+
+```bash
+python -c "
+from monarch_mcp_server.secure_session import SecureMonarchSession
+from monarch_mcp_server.cookie_auth import MonarchMoneyCookieAuth
+import gql.transport.aiohttp as t
+
+# Build a cookie-auth client and inspect the headers/cookies the GraphQL
+# transport will send — no network call is made.
+mm = MonarchMoneyCookieAuth(session_id='sid', csrftoken='csrf')
+print('x-csrftoken header:', mm._headers.get('x-csrftoken'))
+print('Origin header:', mm._headers.get('Origin'))
+print('cookies:', mm._cookies())
+print('Authorization header:', mm._headers.get('Authorization', '(unset)'))
+"
+```
 
 ## 🙏 Acknowledgments
 

@@ -1,6 +1,5 @@
 """Cached MonarchMoney client factory."""
 
-import os
 import logging
 from typing import Optional
 
@@ -26,13 +25,17 @@ def clear_client_cache() -> None:
 
 
 async def get_monarch_client() -> MonarchMoney:
-    """Get or create a cached MonarchMoney client using secure session storage."""
+    """Get or create a cached MonarchMoney client using secure session storage.
+
+    The MCP server never auto-logs in from environment credentials. To
+    authenticate, run ``python login_setup.py`` once to store a session
+    token in the system keyring.
+    """
     global _cached_client
 
     if _cached_client is not None:
         return _cached_client
 
-    # Try to get authenticated client from secure session
     client = secure_session.get_authenticated_client()
 
     if client is not None:
@@ -40,23 +43,8 @@ async def get_monarch_client() -> MonarchMoney:
         _cached_client = client
         return client
 
-    # If no secure session, try environment credentials
-    email = os.getenv("MONARCH_EMAIL")
-    password = os.getenv("MONARCH_PASSWORD")
-
-    if email and password:
-        try:
-            client = MonarchMoney()
-            await client.login(email, password)
-            logger.info(
-                "Successfully logged into Monarch Money with environment credentials"
-            )
-            # Save the session securely
-            secure_session.save_authenticated_session(client)
-            _cached_client = client
-            return client
-        except Exception as e:
-            logger.error(f"Failed to login to Monarch Money: {e}")
-            raise
-
-    raise RuntimeError("Authentication needed! Run: python login_setup.py")
+    raise RuntimeError(
+        "No Monarch session token available. Run `python login_setup.py` "
+        "from a terminal to authenticate. The MCP server does not accept "
+        "credentials and does not read MONARCH_EMAIL/MONARCH_PASSWORD."
+    )

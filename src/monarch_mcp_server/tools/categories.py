@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
 from monarch_mcp_server.helpers import json_success, json_error
+from monarch_mcp_server.read_only import is_read_only, read_only_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,8 @@ async def create_transaction_category(
         rollover_enabled: Optional, whether budget rollover is enabled
         rollover_type: Optional rollover type (e.g. "monthly")
     """
+    if is_read_only():
+        return read_only_refusal("create_transaction_category")
     try:
         client = await get_monarch_client()
         kwargs: Dict[str, Any] = {

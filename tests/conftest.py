@@ -1,6 +1,7 @@
 """Shared test fixtures for Monarch MCP Server tests."""
 
 import json
+import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,6 +13,18 @@ sys.modules.setdefault("monarchmoney", mm_mock)
 sys.modules.setdefault("monarchmoney.monarchmoney", MagicMock())
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def disable_read_only(monkeypatch):
+    """Existing tests exercise mutation paths; opt them out of read-only mode.
+
+    The server defaults to read-only as of the hardening change. Tests that
+    specifically prove the refusal behavior override this fixture by setting
+    ``MONARCH_MCP_READ_ONLY`` back to a truthy value inside the test.
+    """
+    monkeypatch.setenv("MONARCH_MCP_READ_ONLY", "false")
+    yield
 
 
 @pytest.fixture

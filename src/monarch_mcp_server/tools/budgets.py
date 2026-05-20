@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
 from monarch_mcp_server.helpers import json_success, json_error
+from monarch_mcp_server.read_only import is_read_only, read_only_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,8 @@ async def set_budget_amount(
         Clear a budget (set to 0):
             set_budget_amount(amount=0, category_id="cat_123")
     """
+    if is_read_only():
+        return read_only_refusal("set_budget_amount")
     try:
         if category_id and category_group_id:
             return json_success({

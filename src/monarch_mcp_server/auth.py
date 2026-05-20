@@ -1,99 +1,36 @@
-"""Interactive authentication for the Monarch Money MCP server.
+"""Authentication helpers — DISABLED for MCP transport.
 
-Uses MCP elicitation so credentials flow client-UI → server directly over
-the protocol — they never appear in tool arguments or the model's context.
+The previous implementation used MCP elicitation to collect Monarch Money
+credentials over the protocol. That flow has been removed: credentials must
+not flow through the MCP transport, and the server must not be able to
+mutate stored auth state on behalf of a remote client.
+
+To authenticate, run ``python login_setup.py`` from a terminal. The
+standalone script writes a session token to the system keyring; the MCP
+server reads it on subsequent calls but never modifies it.
 """
 
 from __future__ import annotations
 
-from mcp.server.fastmcp import Context
-from monarchmoney import MonarchMoney, RequireMFAException
-from pydantic import BaseModel, Field
 
-from monarch_mcp_server.secure_session import secure_session
+class AuthDisabledError(RuntimeError):
+    """Raised if any code path tries to invoke MCP-side login/logout."""
 
 
-_UPGRADE_HINT = (
-    "Elicitation requires the MCP Python SDK >= 1.10.0 (added in June 2025). "
-    "Your MCP server install appears to be running an older version that does "
-    "not expose Context.elicit. Upgrade the `mcp` package, then restart your "
-    "MCP client. If you launch via `uv run --with mcp[cli]`, run `uv cache "
-    "clean mcp` first so a fresh version is resolved. As a fallback, run "
-    "`python login_setup.py` from the repo to authenticate via terminal."
-)
-
-
-def _elicit_supported(ctx: Context) -> bool:
-    return hasattr(ctx, "elicit")
-
-
-class LoginForm(BaseModel):
-    email: str = Field(description="Monarch Money email address")
-    password: str = Field(description="Monarch Money password")
-
-
-class MFAForm(BaseModel):
-    mfa_code: str = Field(description="Monarch Money MFA code")
-
-
-class TokenForm(BaseModel):
-    token: str = Field(
-        description=(
-            "Monarch Money session token. Grab it from browser DevTools → "
-            "Application → Local Storage for app.monarchmoney.com, key 'token'."
-        ),
+def _disabled(name: str) -> AuthDisabledError:
+    return AuthDisabledError(
+        f"{name} is disabled. Use `python login_setup.py` to manage the "
+        "Monarch Money session out-of-band."
     )
 
 
-async def login_interactive(ctx: Context) -> str:
-    if not _elicit_supported(ctx):
-        return _UPGRADE_HINT
-    form_result = await ctx.elicit(message="Sign in to Monarch Money.", schema=LoginForm)
-    if form_result.action != "accept":
-        return "Login cancelled."
-    form = form_result.data
-
-    mm = MonarchMoney()
-    try:
-        await mm.login(
-            form.email,
-            form.password,
-            use_saved_session=False,
-            save_session=False,
-        )
-    except RequireMFAException:
-        mfa_result = await ctx.elicit(
-            message="Enter your Monarch Money MFA code.", schema=MFAForm
-        )
-        if mfa_result.action != "accept":
-            return "Login cancelled."
-        await mm.multi_factor_authenticate(
-            form.email, form.password, mfa_result.data.mfa_code
-        )
-
-    secure_session.save_authenticated_session(mm)
-    return "Logged in. Session saved to system keyring."
+async def login_interactive(*_args, **_kwargs) -> str:
+    raise _disabled("login_interactive")
 
 
-async def login_with_token_interactive(ctx: Context) -> str:
-    if not _elicit_supported(ctx):
-        return _UPGRADE_HINT
-    form_result = await ctx.elicit(
-        message="Paste your Monarch Money session token.", schema=TokenForm
-    )
-    if form_result.action != "accept":
-        return "Login cancelled."
-
-    token = form_result.data.token.strip()
-    if not token:
-        return "Empty token — aborting."
-
-    mm = MonarchMoney(token=token)
-    await mm.get_subscription_details()
-    secure_session.save_token(token)
-    return "Session token saved to system keyring."
+async def login_with_token_interactive(*_args, **_kwargs) -> str:
+    raise _disabled("login_with_token_interactive")
 
 
-async def logout() -> str:
-    secure_session.delete_token()
-    return "Cleared stored Monarch session."
+async def logout(*_args, **_kwargs) -> str:
+    raise _disabled("logout")

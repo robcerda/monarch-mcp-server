@@ -19,6 +19,7 @@ from monarch_mcp_server.helpers import (
     json_success,
     tool_response_envelope,
 )
+from monarch_mcp_server.read_only import is_read_only, read_only_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -644,6 +645,8 @@ async def create_transaction(
         notes: Optional notes for the transaction
         update_balance: Whether to update the account balance (default: false)
     """
+    if is_read_only():
+        return read_only_refusal("create_transaction")
     try:
         client = await get_monarch_client()
 
@@ -692,6 +695,8 @@ async def update_transaction(
         needs_review: Whether this transaction needs review
         notes: Notes for the transaction
     """
+    if is_read_only():
+        return read_only_refusal("update_transaction")
     try:
         client = await get_monarch_client()
 
@@ -729,6 +734,8 @@ async def categorize_transaction(transaction_id: str, category_id: str) -> str:
         transaction_id: The ID of the transaction to categorize
         category_id: The category ID to assign
     """
+    if is_read_only():
+        return read_only_refusal("categorize_transaction")
     try:
         client = await get_monarch_client()
         result = await client.update_transaction(
@@ -759,6 +766,8 @@ async def update_transaction_notes(
     Returns:
         Updated transaction details.
     """
+    if is_read_only():
+        return read_only_refusal("update_transaction_notes")
     try:
         client = await get_monarch_client()
 
@@ -789,6 +798,8 @@ async def mark_transaction_reviewed(transaction_id: str) -> str:
     Returns:
         Updated transaction details.
     """
+    if is_read_only():
+        return read_only_refusal("mark_transaction_reviewed")
     try:
         client = await get_monarch_client()
         result = await client.update_transaction(
@@ -832,6 +843,9 @@ async def bulk_categorize_transactions(
                 "category_id": category_id,
                 "mark_reviewed": mark_reviewed,
             })
+
+        if is_read_only():
+            return read_only_refusal("bulk_categorize_transactions")
 
         client = await get_monarch_client()
 
@@ -885,6 +899,8 @@ async def delete_transaction(transaction_id: str) -> str:
     Returns:
         Confirmation of deletion.
     """
+    if is_read_only():
+        return read_only_refusal("delete_transaction")
     try:
         client = await get_monarch_client()
         result = await client.delete_transaction(transaction_id=transaction_id)

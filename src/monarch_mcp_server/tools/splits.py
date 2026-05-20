@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
 from monarch_mcp_server.helpers import json_success, json_error
+from monarch_mcp_server.read_only import is_read_only, read_only_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,8 @@ async def split_transaction(
     Returns:
         The updated split information for the transaction.
     """
+    if is_read_only():
+        return read_only_refusal("split_transaction")
     try:
         client = await get_monarch_client()
         result = await client.update_transaction_splits(

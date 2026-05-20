@@ -6,6 +6,7 @@ from typing import List
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
 from monarch_mcp_server.helpers import json_success, json_error
+from monarch_mcp_server.read_only import is_read_only, read_only_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,8 @@ async def set_transaction_tags(
     Returns:
         Updated transaction details.
     """
+    if is_read_only():
+        return read_only_refusal("set_transaction_tags")
     try:
         client = await get_monarch_client()
         result = await client.set_transaction_tags(
@@ -65,6 +68,8 @@ async def create_transaction_tag(name: str, color: str) -> str:
         name: Name of the new tag
         color: Hex color code for the tag (e.g. "#ff0000")
     """
+    if is_read_only():
+        return read_only_refusal("create_transaction_tag")
     try:
         client = await get_monarch_client()
         result = await client.create_transaction_tag(name=name, color=color)
@@ -82,6 +87,8 @@ async def add_transaction_tag(transaction_id: str, tag_id: str) -> str:
         transaction_id: The ID of the transaction
         tag_id: The tag ID to add
     """
+    if is_read_only():
+        return read_only_refusal("add_transaction_tag")
     try:
         client = await get_monarch_client()
         details = await client.get_transaction_details(transaction_id)

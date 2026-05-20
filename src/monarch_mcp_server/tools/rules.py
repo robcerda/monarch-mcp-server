@@ -8,6 +8,7 @@ from gql import gql
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
 from monarch_mcp_server.helpers import json_success, json_error
+from monarch_mcp_server.read_only import is_read_only, read_only_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,8 @@ async def create_transaction_rule(
             set_category_id="cat_123"
         )
     """
+    if is_read_only():
+        return read_only_refusal("create_transaction_rule")
     try:
         client = await get_monarch_client()
 
@@ -336,6 +339,8 @@ async def update_transaction_rule(
     Returns:
         Result of rule update.
     """
+    if is_read_only():
+        return read_only_refusal("update_transaction_rule")
     try:
         client = await get_monarch_client()
 
@@ -398,6 +403,8 @@ async def delete_transaction_rule(rule_id: str) -> str:
     Returns:
         Confirmation of deletion.
     """
+    if is_read_only():
+        return read_only_refusal("delete_transaction_rule")
     try:
         client = await get_monarch_client()
 

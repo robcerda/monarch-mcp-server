@@ -1,12 +1,21 @@
-"""Authentication tools."""
+"""Authentication tools.
+
+The MCP server does not accept credentials. Login, token paste, and logout
+flows are intentionally disabled here — they must be performed out-of-band
+via ``python login_setup.py``. The remaining tools are strictly read-only
+checks against the locally stored session.
+
+As of May 2026 Monarch's API requires session-cookie auth (``session_id``
+HttpOnly + ``csrftoken`` cookies plus an ``x-csrftoken`` header). The
+legacy ``Authorization: Token`` flow is no longer accepted upstream, so
+``check_auth_status`` warns when only a legacy token is stored.
+"""
 
 import logging
 import os
 
-from mcp.server.fastmcp import Context
-
-from monarch_mcp_server import auth
 from monarch_mcp_server.app import mcp
+from monarch_mcp_server.read_only import auth_mutation_disabled
 from monarch_mcp_server.secure_session import secure_session
 
 logger = logging.getLogger(__name__)
@@ -15,66 +24,94 @@ logger = logging.getLogger(__name__)
 @mcp.tool()
 async def setup_authentication() -> str:
     """Get instructions for setting up secure authentication with Monarch Money."""
-    return """🔐 Monarch Money - Authentication Options
+    return """🔐 Monarch Money - Authentication Setup
 
-Option 1: Elicitation login (Recommended for interactive clients)
-   Call 'monarch_login' to enter email/password (and MFA if needed)
-   via a secure form in your client UI. Credentials never pass
-   through the model. Or 'monarch_login_with_token' to paste a
-   browser-copied session token.
+This MCP server does not accept credentials and cannot log you in.
 
-Option 2: Email/Password (Terminal)
-   Run in terminal: python login_setup.py
+To authenticate:
+   Run in a terminal: python login_setup.py
 
-Call 'monarch_logout' to clear the stored session.
+⚠️ As of May 2026, Monarch's API requires session-cookie auth
+   (session_id + csrftoken cookies). The terminal flow will prompt you to
+   paste those cookies from your browser DevTools and store them in the
+   system keyring. The legacy email/password and session-token paths are
+   kept for forward compatibility but currently will NOT authenticate
+   because upstream still ships the old Token-header flow.
 
-✅ Session persists across restarts
-✅ Token stored securely in system keyring"""
+The MCP server picks up the stored cookies (or legacy token) on next call
+but never modifies them.
 
+Once authenticated:
+   ✅ Session persists across restarts
+   ✅ Cookies stored securely in system keyring
 
-@mcp.tool()
-async def monarch_login(ctx: Context) -> str:
-    """Sign in to Monarch Money.
-
-    Opens a secure form in the client UI to collect email, password, and
-    (if required) an MFA code. Credentials never pass through the model —
-    they flow client-UI → server directly via the MCP protocol.
-    """
-    return await auth.login_interactive(ctx)
+Note: MCP-exposed login/logout/token-paste tools are intentionally disabled
+to prevent credentials from flowing through MCP transport or being changed
+remotely. Run login_setup.py to rotate credentials or clear the session."""
 
 
 @mcp.tool()
-async def monarch_login_with_token(ctx: Context) -> str:
-    """Sign in to Monarch Money using a browser-copied session token.
+async def monarch_login() -> str:
+    """[DISABLED] Sign in to Monarch Money.
 
-    Useful for SSO users who can't use password login. Grab the token from
-    browser DevTools → Application → Local Storage → app.monarchmoney.com.
+    This tool is intentionally disabled — the MCP server does not accept
+    credentials. Run ``python login_setup.py`` from a terminal to log in.
     """
-    return await auth.login_with_token_interactive(ctx)
+    return auth_mutation_disabled("monarch_login")
+
+
+@mcp.tool()
+async def monarch_login_with_token() -> str:
+    """[DISABLED] Paste a Monarch Money session token.
+
+    This tool is intentionally disabled. Run ``python login_setup.py`` from
+    a terminal and paste session cookies (or, on the rare chance upstream
+    restores Token-header auth, a legacy session token).
+    """
+    return auth_mutation_disabled("monarch_login_with_token")
 
 
 @mcp.tool()
 async def monarch_logout() -> str:
-    """Clear the stored Monarch Money session from the system keyring."""
-    return await auth.logout()
+    """[DISABLED] Clear the stored Monarch Money session.
+
+    This tool is intentionally disabled so that an MCP client cannot wipe a
+    user's stored session. Clear the session out-of-band by deleting the
+    keyring entry or by running ``python login_setup.py`` and replacing it.
+    """
+    return auth_mutation_disabled("monarch_logout")
 
 
 @mcp.tool()
 async def check_auth_status() -> str:
     """Check if already authenticated with Monarch Money."""
     try:
+        cookies = secure_session.load_cookies()
         token = secure_session.load_token()
-        if token:
-            status = "✅ Authentication token found in secure keyring storage\n"
+        if cookies:
+            status = "✅ Session cookies found in secure keyring storage\n"
+        elif token:
+            status = (
+                "⚠️ Only a legacy session token is stored — Monarch's API "
+                "currently rejects Token-header auth (May 2026 change). "
+                "Run `python login_setup.py` and choose the cookie option "
+                "to switch to session-cookie auth.\n"
+            )
         else:
-            status = "❌ No authentication token found in keyring\n"
+            status = "❌ No authentication session found in keyring\n"
 
+        # MONARCH_EMAIL is no longer used for auto-login, but surface it for
+        # diagnostic clarity if an operator left it in their environment.
         email = os.getenv("MONARCH_EMAIL")
         if email:
-            status += f"📧 Environment email: {email}\n"
+            status += (
+                f"📧 MONARCH_EMAIL is set in env ({email}) but is NOT used "
+                "for auto-login. Ignored.\n"
+            )
 
         status += (
-            "\n💡 Try get_accounts to test connection or run login_setup.py if needed."
+            "\n💡 Try get_accounts to test the connection. If not "
+            "authenticated, run login_setup.py from a terminal."
         )
 
         return status
@@ -86,10 +123,20 @@ async def check_auth_status() -> str:
 async def debug_session_loading() -> str:
     """Debug keyring session loading issues."""
     try:
+        cookies = secure_session.load_cookies()
+        if cookies:
+            return "✅ Session cookies found in keyring."
         token = secure_session.load_token()
         if token:
-            return "✅ Token found in keyring."
-        return "❌ No token found in keyring. Run login_setup.py to authenticate."
+            return (
+                "⚠️ Only a legacy token found in keyring. Monarch's API "
+                "rejects Token-header auth as of May 2026. Run "
+                "login_setup.py and switch to cookie auth."
+            )
+        return (
+            "❌ No session found in keyring. Run login_setup.py to "
+            "authenticate."
+        )
     except Exception as e:
         logger.exception("Keyring access failed")
         return f"❌ Keyring access failed: {type(e).__name__}: {e}"

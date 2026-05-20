@@ -11,6 +11,7 @@ from pydantic import RootModel, ValidationError
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
 from monarch_mcp_server.helpers import json_success, json_error
+from monarch_mcp_server.read_only import is_read_only, read_only_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,8 @@ async def get_accounts() -> str:
 @mcp.tool()
 async def refresh_accounts() -> str:
     """Request account data refresh from financial institutions."""
+    if is_read_only():
+        return read_only_refusal("refresh_accounts")
     try:
         client = await get_monarch_client()
         result = await client.request_accounts_refresh()
@@ -145,6 +148,8 @@ async def upload_account_balance_history(
     Mismatched dates (corrections that do not match any existing snapshot) are
     surfaced explicitly in the response rather than silently dropped.
     """
+    if is_read_only() and not dry_run:
+        return read_only_refusal("upload_account_balance_history")
     try:
         try:
             raw = json.loads(corrections)

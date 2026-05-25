@@ -74,13 +74,46 @@ class TestGetAccountHoldings:
 
 
 class TestRefreshAccounts:
-    async def test_refreshes_accounts(self):
+    async def test_auto_discovers_active_visible_accounts(self, mock_monarch_client):
+        """No args → fetch accounts, refresh only active+non-hidden ones."""
         result = json.loads(await refresh_accounts())
         assert result["requestAccountsRefresh"]["success"] is True
+        # Default fixture: acc-1 active+visible, acc-2 hidden. Only acc-1 refreshes.
+        mock_monarch_client.request_accounts_refresh.assert_awaited_once_with(["acc-1"])
+
+    async def test_passes_explicit_account_ids(self, mock_monarch_client):
+        """Explicit account_ids must be passed through unchanged."""
+        result = json.loads(await refresh_accounts(account_ids=["acc-9", "acc-42"]))
+        assert result["requestAccountsRefresh"]["success"] is True
+        mock_monarch_client.request_accounts_refresh.assert_awaited_once_with(
+            ["acc-9", "acc-42"]
+        )
+        # Must not have looked up accounts when caller specified the list.
+        mock_monarch_client.get_accounts.assert_not_called()
+
+    async def test_empty_list_falls_back_to_auto_discover(self, mock_monarch_client):
+        """An empty list is treated as 'refresh all visible', matching no-arg."""
+        await refresh_accounts(account_ids=[])
+        mock_monarch_client.request_accounts_refresh.assert_awaited_once_with(["acc-1"])
+
+    async def test_no_visible_accounts_returns_graceful_message(
+        self, mock_monarch_client
+    ):
+        """If every account is hidden or inactive, do not call the upstream API."""
+        mock_monarch_client.get_accounts.return_value = {
+            "accounts": [
+                {"id": "acc-h", "isHidden": True, "deactivatedAt": None},
+                {"id": "acc-d", "isHidden": False, "deactivatedAt": "2025-01-01"},
+            ]
+        }
+        result = json.loads(await refresh_accounts())
+        assert result["refreshed"] == []
+        assert "No active" in result["message"]
+        mock_monarch_client.request_accounts_refresh.assert_not_called()
 
     async def test_handles_api_error(self, mock_monarch_client):
         mock_monarch_client.request_accounts_refresh.side_effect = Exception("Timeout")
-        result = await refresh_accounts()
+        result = await refresh_accounts(account_ids=["acc-1"])
         assert "refresh_accounts" in result
 
 

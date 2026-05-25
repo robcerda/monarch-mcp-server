@@ -253,7 +253,7 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 | `get_account_holdings` | Get investment holdings | `account_id` |
 | `create_transaction` | Create new transaction | `account_id`, `amount`, `description`, `date`, `category_id`, `merchant_name` |
 | `update_transaction` | Update existing transaction | `transaction_id`, `amount`, `description`, `category_id`, `date` |
-| `refresh_accounts` | Request account data refresh | None |
+| `refresh_accounts` | Request account data refresh | `account_ids` (optional — defaults to all active, visible accounts) |
 | `get_categories` | List all transaction categories | None |
 | `get_category_groups` | List category groups with categories | None |
 | `get_transactions_needing_review` | Get transactions needing review | `needs_review`, `days`, `uncategorized`, `no_notes` |

@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from pydantic import RootModel, ValidationError
 
@@ -51,11 +51,30 @@ async def get_accounts() -> str:
 
 
 @mcp.tool()
-async def refresh_accounts() -> str:
-    """Request account data refresh from financial institutions."""
+async def refresh_accounts(account_ids: Optional[List[str]] = None) -> str:
+    """Request account data refresh from financial institutions.
+
+    Args:
+        account_ids: Specific account IDs to refresh. If omitted or empty,
+            refreshes all active, non-hidden accounts.
+    """
     try:
         client = await get_monarch_client()
-        result = await client.request_accounts_refresh()
+        if not account_ids:
+            accounts = await client.get_accounts()
+            account_ids = [
+                a["id"]
+                for a in accounts.get("accounts", [])
+                if (
+                    a.get("isActive", not a.get("deactivatedAt"))
+                    and not a.get("isHidden")
+                )
+            ]
+        if not account_ids:
+            return json_success(
+                {"refreshed": [], "message": "No active, visible accounts to refresh"}
+            )
+        result = await client.request_accounts_refresh(account_ids)
         return json_success(result)
     except Exception as e:
         return json_error("refresh_accounts", e)

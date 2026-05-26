@@ -37,6 +37,8 @@ async def get_accounts() -> str:
                 "name": account.get("displayName") or account.get("name"),
                 "type": (account.get("type") or {}).get("name"),
                 "balance": account.get("currentBalance"),
+                "current_balance": account.get("currentBalance"),
+                "display_balance": account.get("displayBalance"),
                 "institution": (account.get("institution") or {}).get("name"),
                 "is_active": account.get("isActive")
                 if "isActive" in account

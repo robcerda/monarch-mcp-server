@@ -19,6 +19,8 @@ class TestGetAccounts:
         assert result[0]["name"] == "Checking Account"
         assert result[0]["type"] == "checking"
         assert result[0]["balance"] == 1500.00
+        assert result[0]["current_balance"] == 1500.00
+        assert result[0]["display_balance"] == 500.00
         assert result[0]["institution"] == "Test Bank"
         assert result[0]["is_active"] is True
         assert result[0]["is_hidden"] is False
@@ -35,6 +37,7 @@ class TestGetAccounts:
                     "displayName": "Unknown",
                     "type": None,
                     "currentBalance": 0,
+                    "displayBalance": 0,
                     "institution": None,
                     "deactivatedAt": None,
                     "isHidden": False,
@@ -44,6 +47,9 @@ class TestGetAccounts:
         result = json.loads(await get_accounts())
         assert result[0]["type"] is None
         assert result[0]["institution"] is None
+        assert result[0]["balance"] == 0
+        assert result[0]["current_balance"] == 0
+        assert result[0]["display_balance"] == 0
 
     async def test_handles_empty_accounts(self, mock_monarch_client):
         mock_monarch_client.get_accounts.return_value = {"accounts": []}

@@ -1251,35 +1251,124 @@ def update_account(
         return f"Error updating account: {str(e)}"
 
 
+class TransactionSplit(BaseModel):
+    """A single allocation within a transaction split."""
+
+    amount: float = Field(
+        description=(
+            "SIGNED dollar amount for this split, using the SAME SIGN as the parent "
+            "transaction. Expenses are NEGATIVE (e.g. -145.54), income is POSITIVE. "
+            "The sum of all splits' amounts MUST equal the parent transaction's amount "
+            "exactly, or Monarch rejects the request."
+        )
+    )
+    category_id: str = Field(
+        description=(
+            "Category ID for this split (from get_transaction_categories). Required - "
+            "a split with no/invalid category is silently dropped by Monarch."
+        )
+    )
+    merchant_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Merchant name for this split. Optional - defaults to the parent "
+            "transaction's merchant when omitted."
+        ),
+    )
+    hide_from_reports: bool = Field(
+        default=False,
+        description="Whether to exclude this split from reports and budgets.",
+    )
+
+
 @mcp.tool()
 def update_transaction_splits(
     transaction_id: str,
-    split_data: str,
+    splits: List[TransactionSplit],
 ) -> str:
     """
-    Update split allocations for a transaction.
+    Replace the split allocations for a transaction.
+
+    This REPLACES all existing splits on the transaction with the ones provided.
+    Pass an empty list to remove all splits and restore the transaction to a single
+    unsplit line.
+
+    CRITICAL RULES (the two things that most often cause silent failures):
+      1. SIGNED AMOUNTS: each split's `amount` uses the same sign as the parent
+         transaction. Expenses are negative (e.g. -145.54), income positive.
+      2. AMOUNTS MUST SUM TO THE PARENT: the sum of all split amounts must equal the
+         parent transaction's amount exactly. This tool validates this before sending
+         and returns a clear error (with the numbers) if it doesn't match.
 
     Args:
-        transaction_id: The ID of the transaction to split
-        split_data: JSON array of splits, each with:
-                   - amount: Split amount (positive value)
-                   - category_id: Category ID for this split
-                   - merchant_name (optional): Merchant name for this split
-                   Example: '[{"amount": 50.00, "category_id": "123"}, {"amount": 25.00, "category_id": "456"}]'
+        transaction_id: The ID of the transaction to split.
+        splits: List of split allocations. Each split has amount (signed),
+                category_id (required), merchant_name (optional), and
+                hide_from_reports (optional, default false).
 
-    Returns: JSON with updated transaction splits
+    Example - split a -$153.54 Target expense into clothing (-$145.54) and household (-$8.00):
+        splits=[
+          {"amount": -145.54, "category_id": "231909059602791072", "merchant_name": "Target"},
+          {"amount": -8.00,   "category_id": "231909059602791068", "merchant_name": "Target"}
+        ]
+
+    Returns: JSON with the updated transaction splits, or a clear error message.
     """
     try:
-        splits = json.loads(split_data)
+        # Empty list => delete all splits (handled directly by the API).
+        if splits:
+            async def _get_parent():
+                client = await get_monarch_client_with_retry()
+                return await client.get_transaction_details(transaction_id)
+
+            parent = run_async(_get_parent())
+            parent_txn = (parent or {}).get("getTransaction", {}) or {}
+            parent_amount = parent_txn.get("amount")
+            parent_merchant = (parent_txn.get("merchant") or {}).get("name")
+
+            split_sum = round(sum(s.amount for s in splits), 2)
+
+            if parent_amount is not None:
+                parent_amount = round(float(parent_amount), 2)
+
+                # Wrong-sign detection: sum matches the parent's magnitude but not its sign.
+                if abs(split_sum + parent_amount) < 0.01 and abs(split_sum - parent_amount) >= 0.01:
+                    return (
+                        f"Error: split amounts have the WRONG SIGN. Parent transaction "
+                        f"amount is {parent_amount} but your splits sum to {split_sum}. "
+                        f"Expenses must be NEGATIVE - flip the signs so the splits sum to "
+                        f"{parent_amount}."
+                    )
+
+                if abs(split_sum - parent_amount) >= 0.01:
+                    return (
+                        f"Error: split amounts must sum to the parent transaction amount. "
+                        f"Parent is {parent_amount}, but your splits sum to {split_sum} "
+                        f"(off by {round(split_sum - parent_amount, 2)}). Adjust the splits "
+                        f"so they total exactly {parent_amount}."
+                    )
+
+        # Map to the camelCase shape the Monarch GraphQL API expects. The library passes
+        # these keys straight through with no conversion, so snake_case keys are ignored.
+        split_data = []
+        for s in splits:
+            split_data.append(
+                {
+                    "amount": s.amount,
+                    "categoryId": s.category_id,
+                    "merchantName": s.merchant_name
+                    if s.merchant_name is not None
+                    else parent_merchant,
+                    "hideFromReports": s.hide_from_reports,
+                }
+            )
 
         async def _update_splits():
             client = await get_monarch_client_with_retry()
-            return await client.update_transaction_splits(transaction_id, splits)
+            return await client.update_transaction_splits(transaction_id, split_data)
 
         result = run_async(_update_splits())
         return json.dumps(result, indent=2, default=str)
-    except json.JSONDecodeError as e:
-        return f"Error parsing split_data JSON: {str(e)}"
     except Exception as e:
         logger.error(f"Failed to update transaction splits: {e}")
         return f"Error updating transaction splits: {str(e)}"

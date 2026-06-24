@@ -25,6 +25,9 @@ Option 1: Elicitation login (Recommended for interactive clients)
 
 Option 2: Email/Password (Terminal)
    Run in terminal: python login_setup.py
+   Enter the email verification code if Monarch sends one (this can
+   happen for a new device/session even when MFA is off), and your
+   2FA code if MFA is enabled.
 
 Call 'monarch_logout' to clear the stored session.
 

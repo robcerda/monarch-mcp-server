@@ -93,31 +93,48 @@ def mock_monarch_client():
         }
     }
 
-    client.get_budgets.return_value = {
+    # get_budgets now fetches via a custom GraphQL query (client.gql_call),
+    # matching the MCPBudgetData query in tools/budgets.py.
+    client.gql_call.return_value = {
         "budgetData": {
             "monthlyAmountsByCategory": [
                 {
-                    "category": {"id": "cat-1", "name": "Groceries"},
+                    "category": {"id": "cat-1"},
                     "monthlyAmounts": [
                         {
                             "month": "2026-03-01",
                             "plannedCashFlowAmount": 500.00,
-                            "actualCashFlowAmount": 320.00,
+                            "plannedSetAsideAmount": 0.00,
+                            "actualAmount": 320.00,
+                            "remainingAmount": 180.00,
                         }
                     ],
                 },
                 {
-                    "category": {"id": "cat-2", "name": "Dining Out"},
+                    "category": {"id": "cat-2"},
                     "monthlyAmounts": [
                         {
                             "month": "2026-03-01",
                             "plannedCashFlowAmount": 200.00,
-                            "actualCashFlowAmount": 185.00,
+                            "plannedSetAsideAmount": 0.00,
+                            "actualAmount": 185.00,
+                            "remainingAmount": 15.00,
                         }
                     ],
                 },
             ]
-        }
+        },
+        "categoryGroups": [
+            {
+                "id": "grp-1",
+                "name": "Food",
+                "type": "expense",
+                "categories": [
+                    {"id": "cat-1", "name": "Groceries"},
+                    {"id": "cat-2", "name": "Dining Out"},
+                ],
+            }
+        ],
     }
 
     client.get_cashflow.return_value = {

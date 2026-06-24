@@ -8,8 +8,6 @@ import asyncio
 import os
 import getpass
 import shutil
-import inspect
-import traceback
 import sys
 from pathlib import Path
 
@@ -17,13 +15,15 @@ from pathlib import Path
 src_path = Path(__file__).parent / "src"
 sys.path.insert(0, str(src_path))
 
-from monarchmoney import MonarchMoney, RequireMFAException
-from dotenv import load_dotenv
+from monarchmoney import RequireMFAException
+from monarch_mcp_server.monarch_auth import (
+    EmailOtpRequiredException,
+    create_monarch_client,
+    login_with_current_auth,
+)
 from monarch_mcp_server.secure_session import secure_session
 
 async def main():
-    load_dotenv()
-    
     print("\n🏦 Monarch Money - Claude Desktop Setup")
     print("=" * 45)
     print("This will authenticate you once and save a session")
@@ -36,8 +36,8 @@ async def main():
     except Exception as e:
         print(f"⚠️  Could not check version: {e}")
     
-    mm = MonarchMoney()
-    
+    mm = None
+
     try:
         # Clear any existing sessions (both old pickle files and keyring)
         secure_session.delete_token()
@@ -81,27 +81,30 @@ async def main():
             if not token:
                 print("❌ No token provided. Exiting.")
                 return
-            # Re-initialize with the token so the Authorization header is set correctly.
-            # set_token() only stores the value but does not update _headers.
-            mm = MonarchMoney(token=token)
+            # Build the client with the current API host and device metadata so
+            # the saved session reloads cleanly later.
+            mm = create_monarch_client(token=token)
             print("✅ Token set")
         else:
             email = input("Email: ")
             password = getpass.getpass("Password: ")
 
-            # Try login without MFA first
+            # Try login without extra verification first.
             try:
-                await mm.login(email, password, use_saved_session=False, save_session=True)
+                mm = await login_with_current_auth(email, password)
                 print("✅ Login successful!")
+
+            except EmailOtpRequiredException:
+                print("📧 Monarch sent a verification code to your email.")
+                email_code = input("Email verification code: ").strip()
+                mm = await login_with_current_auth(email, password, email_otp=email_code)
+                print("✅ Email verification successful")
 
             except RequireMFAException:
                 print("🔐 MFA code required")
                 mfa_code = input("Two Factor Code: ")
-
-                # Use the same instance for MFA
-                await mm.multi_factor_authenticate(email, password, mfa_code)
+                mm = await login_with_current_auth(email, password, mfa_code=mfa_code)
                 print("✅ MFA authentication successful")
-                mm.save_session()  # Manually save the session
         
         # Test the connection first
         print("\nTesting connection...")
@@ -132,27 +135,34 @@ async def main():
                     print("🗑️ Cleared expired session files")
                 
                 # Try fresh login
-                mm_fresh = MonarchMoney()
                 try:
-                    await mm_fresh.login(email, password)
-                    print("✅ Fresh login successful (no MFA required)")
-                    mm = mm_fresh
-                    
+                    mm = await login_with_current_auth(email, password)
+                    print("✅ Fresh login successful (no extra verification required)")
+
                     # Test connection again
                     accounts = await mm.get_accounts()
                     if accounts and isinstance(accounts, dict):
                         account_count = len(accounts.get("accounts", []))
                         print(f"✅ Found {account_count} accounts")
-                    
+
+                except EmailOtpRequiredException:
+                    print("📧 Monarch sent a verification code to your email.")
+                    email_code = input("Email verification code: ").strip()
+                    mm = await login_with_current_auth(email, password, email_otp=email_code)
+                    print("✅ Fresh email verification successful")
+
+                    # Test connection again
+                    accounts = await mm.get_accounts()
+                    if accounts and isinstance(accounts, dict):
+                        account_count = len(accounts.get("accounts", []))
+                        print(f"✅ Found {account_count} accounts")
+
                 except RequireMFAException:
                     print("🔐 MFA required for fresh login")
                     mfa_code = input("Two Factor Code: ")
-                    
-                    mm_mfa_fresh = MonarchMoney()
-                    await mm_mfa_fresh.multi_factor_authenticate(email, password, mfa_code)
+                    mm = await login_with_current_auth(email, password, mfa_code=mfa_code)
                     print("✅ Fresh MFA authentication successful")
-                    mm = mm_mfa_fresh
-                    
+
                     # Test connection again
                     accounts = await mm.get_accounts()
                     if accounts and isinstance(accounts, dict):

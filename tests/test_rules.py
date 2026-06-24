@@ -185,6 +185,51 @@ class TestCreateTransactionRule:
         assert data["success"] is False
         assert data["errors"] is not None
 
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_create_rule_with_multiple_merchant_values(self, mock_get_client):
+        """Test creating a rule that matches multiple merchants in one rule."""
+        mock_client = AsyncMock()
+        mock_client.gql_call.return_value = {
+            "createTransactionRuleV2": {"errors": None}
+        }
+        mock_get_client.return_value = mock_client
+
+        result = await create_transaction_rule(
+            merchant_criteria_operator="contains",
+            merchant_criteria_values=["american education services", "origin aes"],
+            set_category_id="cat_student_loans"
+        )
+
+        data = json.loads(result)
+        assert data["success"] is True
+
+        call_args = mock_client.gql_call.call_args
+        criteria = call_args.kwargs["variables"]["input"]["merchantNameCriteria"]
+        assert len(criteria) == 2
+        assert criteria[0] == {"operator": "contains", "value": "american education services"}
+        assert criteria[1] == {"operator": "contains", "value": "origin aes"}
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_create_rule_multiple_values_default_operator(self, mock_get_client):
+        """merchant_criteria_values should default to the 'contains' operator."""
+        mock_client = AsyncMock()
+        mock_client.gql_call.return_value = {
+            "createTransactionRuleV2": {"errors": None}
+        }
+        mock_get_client.return_value = mock_client
+
+        result = await create_transaction_rule(
+            merchant_criteria_values=["fnbo", "slice"]
+        )
+
+        data = json.loads(result)
+        assert data["success"] is True
+
+        call_args = mock_client.gql_call.call_args
+        criteria = call_args.kwargs["variables"]["input"]["merchantNameCriteria"]
+        assert [c["value"] for c in criteria] == ["fnbo", "slice"]
+        assert all(c["operator"] == "contains" for c in criteria)
+
 
 class TestUpdateTransactionRule:
     """Tests for update_transaction_rule tool."""
@@ -231,6 +276,29 @@ class TestUpdateTransactionRule:
 
         data = json.loads(result)
         assert data["success"] is False
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_update_rule_with_multiple_merchant_values(self, mock_get_client):
+        """Test updating a rule to match multiple merchants in one rule."""
+        mock_client = AsyncMock()
+        mock_client.gql_call.return_value = {
+            "updateTransactionRuleV2": {"errors": None}
+        }
+        mock_get_client.return_value = mock_client
+
+        result = await update_transaction_rule(
+            rule_id="rule_123",
+            merchant_criteria_operator="contains",
+            merchant_criteria_values=["courtyard", "hotel"],
+            set_category_id="cat_hotel"
+        )
+
+        data = json.loads(result)
+        assert data["success"] is True
+
+        call_args = mock_client.gql_call.call_args
+        criteria = call_args.kwargs["variables"]["input"]["merchantNameCriteria"]
+        assert [c["value"] for c in criteria] == ["courtyard", "hotel"]
 
 
 class TestDeleteTransactionRule:
@@ -281,3 +349,19 @@ class TestDeleteTransactionRule:
         data = json.loads(result)
         assert data["error"] is True
         assert "API error" in data["message"]
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_delete_rule_success_without_deleted_flag(self, mock_get_client):
+        """Monarch omits the `deleted` flag on success; absence of errors
+        should be treated as a successful deletion, not 'Unknown error'."""
+        mock_client = AsyncMock()
+        mock_client.gql_call.return_value = {
+            "deleteTransactionRule": {"errors": None}
+        }
+        mock_get_client.return_value = mock_client
+
+        result = await delete_transaction_rule(rule_id="rule_123")
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert "deleted" in data["message"].lower()

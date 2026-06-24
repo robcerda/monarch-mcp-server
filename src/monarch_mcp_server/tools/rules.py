@@ -208,6 +208,7 @@ async def get_transaction_rules() -> str:
 async def create_transaction_rule(
     merchant_criteria_operator: Optional[str] = None,
     merchant_criteria_value: Optional[str] = None,
+    merchant_criteria_values: Optional[List[str]] = None,
     amount_operator: Optional[str] = None,
     amount_value: Optional[float] = None,
     amount_is_expense: bool = True,
@@ -256,11 +257,17 @@ async def create_transaction_rule(
             "applyToExistingTransactions": apply_to_existing,
         }
 
-        if merchant_criteria_operator and merchant_criteria_value:
-            rule_input["merchantNameCriteria"] = [{
-                "operator": merchant_criteria_operator,
-                "value": merchant_criteria_value,
-            }]
+        # Accept either a single merchant value or a list of values. When a
+        # list is given, build one criterion per value sharing the operator
+        # (defaults to "contains"). This lets one rule match many merchants.
+        _merchant_op = merchant_criteria_operator or "contains"
+        _merchant_values = [v for v in (merchant_criteria_values or []) if v]
+        if not _merchant_values and merchant_criteria_value:
+            _merchant_values = [merchant_criteria_value]
+        if _merchant_values:
+            rule_input["merchantNameCriteria"] = [
+                {"operator": _merchant_op, "value": v} for v in _merchant_values
+            ]
 
         if amount_operator and amount_value is not None:
             rule_input["amountCriteria"] = {
@@ -304,6 +311,7 @@ async def update_transaction_rule(
     rule_id: str,
     merchant_criteria_operator: Optional[str] = None,
     merchant_criteria_value: Optional[str] = None,
+    merchant_criteria_values: Optional[List[str]] = None,
     amount_operator: Optional[str] = None,
     amount_value: Optional[float] = None,
     amount_is_expense: bool = True,
@@ -344,11 +352,17 @@ async def update_transaction_rule(
             "applyToExistingTransactions": apply_to_existing,
         }
 
-        if merchant_criteria_operator and merchant_criteria_value:
-            rule_input["merchantNameCriteria"] = [{
-                "operator": merchant_criteria_operator,
-                "value": merchant_criteria_value,
-            }]
+        # Accept either a single merchant value or a list of values. When a
+        # list is given, build one criterion per value sharing the operator
+        # (defaults to "contains"). This lets one rule match many merchants.
+        _merchant_op = merchant_criteria_operator or "contains"
+        _merchant_values = [v for v in (merchant_criteria_values or []) if v]
+        if not _merchant_values and merchant_criteria_value:
+            _merchant_values = [merchant_criteria_value]
+        if _merchant_values:
+            rule_input["merchantNameCriteria"] = [
+                {"operator": _merchant_op, "value": v} for v in _merchant_values
+            ]
 
         if amount_operator and amount_value is not None:
             rule_input["amountCriteria"] = {
@@ -407,14 +421,20 @@ async def delete_transaction_rule(rule_id: str) -> str:
             variables={"id": rule_id},
         )
 
-        delete_result = result.get("deleteTransactionRule", {})
-        if delete_result.get("deleted"):
-            return json_success({"success": True, "message": "Rule deleted successfully"})
+        # Monarch's deleteTransactionRule can return a payload where the
+        # `deleted` flag is absent/null even when the deletion succeeded, which
+        # previously produced a false "Unknown error". Treat an explicit errors
+        # payload (or deleted == False) as failure; otherwise the mutation was
+        # accepted and the rule is gone.
+        delete_result = result.get("deleteTransactionRule") or {}
 
         errors = delete_result.get("errors")
         if errors:
             return json_success({"success": False, "errors": errors})
 
-        return json_success({"success": False, "message": "Unknown error"})
+        if delete_result.get("deleted") is False:
+            return json_success({"success": False, "message": "Rule was not deleted"})
+
+        return json_success({"success": True, "message": "Rule deleted successfully"})
     except Exception as e:
         return json_error("delete_transaction_rule", e)

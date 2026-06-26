@@ -2,15 +2,17 @@
 
 import logging
 
-from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
+# The gql aiohttp transport logs full GraphQL requests/responses at INFO, which
+# can include Monarch account payloads. Raise its floor to WARNING so those
+# payloads are not written to logs. Transport-level errors still surface; drop
+# this to INFO/DEBUG temporarily if you need to trace GraphQL traffic.
+logging.getLogger("gql.transport.aiohttp").setLevel(logging.WARNING)
 
 # Initialize FastMCP server
 mcp = FastMCP("Monarch Money MCP Server")

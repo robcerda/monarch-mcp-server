@@ -153,8 +153,10 @@ uv run python login_setup.py
 
 Follow the prompts:
 - Enter your Monarch Money email and password
+- Provide the email verification code if Monarch sends one (this can happen for a
+  new device or session even when MFA is not enabled)
 - Provide 2FA code if you have MFA enabled
-- Session will be saved automatically
+- The session token is saved automatically in your system keyring
 
 ### 3. Start Using
 
@@ -231,6 +233,7 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 
 ### 🔐 Secure Authentication
 - **One-Time Setup**: Authenticate once, use for weeks/months
+- **Email OTP Support**: Handles Monarch's email verification flow for new devices/sessions
 - **MFA Support**: Full support for two-factor authentication
 - **SSO/Google sign-in**: Use `monarch_login_with_token` to paste a session token from your browser
 - **Session Persistence**: No need to re-authenticate frequently
@@ -402,10 +405,16 @@ If you see "Authentication needed" errors:
 2. Restart Claude Desktop or Claude Code
 3. Try using a tool like `get_accounts`
 
+### Email Verification Required
+Monarch may require an email one-time code for a new device or session, even if MFA is not enabled. If you see an email-code prompt:
+1. Check the email address on your Monarch account
+2. Enter the one-time code in `login_setup.py`
+3. Let the script finish so it can save the reusable token to your system keyring
+
 ### Session Expired
 Sessions last for weeks, but if expired:
 1. Run the same setup command again: `python login_setup.py` (or `uv run python login_setup.py`)
-2. Enter your credentials and 2FA code
+2. Enter your credentials and any requested email verification or 2FA code
 3. Session will be refreshed automatically
 
 ### `'Context' object has no attribute 'elicit'`
@@ -419,6 +428,7 @@ Then fully quit and reopen Claude Desktop or Claude Code so it relaunches the se
 
 ### Common Error Messages
 - **"No valid session found"**: Run `python login_setup.py` (or `uv run python login_setup.py`) 
+- **"Monarch sent a one-time code to your email"**: Run `python login_setup.py` and complete email verification
 - **"Invalid account ID"**: Use `get_accounts` to see valid account IDs
 - **"Date format error"**: Use YYYY-MM-DD format for dates
 
@@ -429,23 +439,29 @@ Then fully quit and reopen Claude Desktop or Claude Code so it relaunches the se
 monarch-mcp-server/
 ├── src/monarch_mcp_server/
 │   ├── __init__.py
-│   └── server.py          # Main server implementation
-├── login_setup.py         # Email/password authentication script
+│   ├── app.py             # FastMCP app instance and entry point
+│   ├── client.py          # Cached MonarchMoney client factory
+│   ├── monarch_auth.py    # Current Monarch auth compatibility (host, email OTP, device-uuid)
+│   ├── secure_session.py  # Keyring-backed token storage (file fallback)
+│   ├── server.py          # Backward-compatibility shim re-exporting the tools
+│   └── tools/             # MCP tools grouped by domain (accounts, transactions, budgets, …)
+├── login_setup.py         # Terminal authentication script
 ├── pyproject.toml         # Project configuration
 ├── requirements.txt       # Dependencies
 └── README.md             # This documentation
 ```
 
 ### Session Management
-- Sessions are stored securely in `.mm/mm_session.pickle`
-- Automatic session discovery and loading
+- Session tokens are stored securely in the system keyring (with an automatic file fallback for environments without a keyring backend)
+- The `device-uuid` captured at login is stored alongside the token so it reloads cleanly
 - Sessions persist across Claude Desktop and Claude Code restarts
 - No need for frequent re-authentication
 
 ### Security Features
 - Credentials never transmitted through Claude Desktop or Claude Code
 - MFA/2FA fully supported
-- Session files are encrypted
+- Email verification codes are handled only in the terminal setup script
+- Session tokens are stored in the system keyring
 - Authentication handled in secure terminal environment
 
 ### Recommended: require approval for mutating tools

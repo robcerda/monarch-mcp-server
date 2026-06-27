@@ -135,28 +135,40 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
 
 **Important**: For security and MFA support, authentication is done outside of Claude.
 
-#### Option A: Email/Password Login
+Open a terminal and run:
 
-Open Terminal and run:
-
-**Using `python`**:
 ```bash
 cd /path/to/your/monarch-mcp-server
-python login_setup.py
+uv run python login_setup.py        # or: python login_setup.py
 ```
 
-**Using `uv`**:
-```bash
-cd /path/to/your/monarch-mcp-server
-uv run python login_setup.py
-```
+The script offers three login paths:
 
-Follow the prompts:
-- Enter your Monarch Money email and password
-- Provide the email verification code if Monarch sends one (this can happen for a
-  new device or session even when MFA is not enabled)
-- Provide 2FA code if you have MFA enabled
-- The session token is saved automatically in your system keyring
+#### Option 1 (recommended): Session cookies from your browser
+
+Long-lived sessions, supports SSO accounts, and sidesteps Cloudflare CAPTCHA gates on programmatic login. Steps:
+
+1. Log in to https://app.monarch.com in Chrome or Firefox.
+2. Open DevTools (F12) → Network tab.
+3. Click any request whose Name starts with `graphql` (or any request to `api.monarch.com`).
+4. Scroll to Request Headers, find the `cookie:` header, and copy the full value.
+5. Paste it into the prompt.
+
+The script verifies the cookies against the live API before saving them to your system keyring.
+
+#### Option 2: Email and password
+
+Standard interactive login. The script handles:
+
+- Email verification codes (Monarch may send one for a new device session even when MFA is off).
+- TOTP MFA codes if you have MFA enabled.
+- Cloudflare CAPTCHA detection: if Monarch blocks programmatic login, the script tells you to switch to option 1.
+
+The resulting long-lived session token is saved to your system keyring.
+
+#### Option 3: Legacy session token paste
+
+Kept for users with an existing token captured before the May 2026 API change. Monarch may no longer accept token-only auth on the GraphQL endpoint; if the verification call returns 401, fall back to option 1.
 
 ### 3. Start Using
 
@@ -411,11 +423,11 @@ Monarch may require an email one-time code for a new device or session, even if 
 2. Enter the one-time code in `login_setup.py`
 3. Let the script finish so it can save the reusable token to your system keyring
 
-### Session Expired
-Sessions last for weeks, but if expired:
-1. Run the same setup command again: `python login_setup.py` (or `uv run python login_setup.py`)
-2. Enter your credentials and any requested email verification or 2FA code
-3. Session will be refreshed automatically
+### Session Expired or 401 within an hour
+If your session dies quickly (under a couple of hours), the most common cause is that Monarch returned a short-lived token. The login script now requests `trusted_device=True` and rejects any short-lived token, so a fresh login produces a long-lived session. If you re-run `login_setup.py` and the issue persists, switch to option 1 (browser cookies); cookie sessions track the lifetime of the underlying browser login.
+
+### Cloudflare CAPTCHA on login
+If `login_setup.py` reports "Programmatic login is blocked by Cloudflare CAPTCHA", choose option 1 (browser cookies) instead. Email/password POSTs to Monarch's login endpoint are sometimes gated by Cloudflare for unfamiliar IPs or rapid retries; cookie-based auth bypasses that endpoint entirely.
 
 ### `'Context' object has no attribute 'elicit'`
 The `monarch_login` and `monarch_login_with_token` tools require the MCP Python SDK 1.10.0 or newer (released June 2025). If your environment cached an older `mcp` install, refresh it:

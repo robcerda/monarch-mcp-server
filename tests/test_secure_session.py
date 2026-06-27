@@ -135,3 +135,202 @@ class TestKeyringAvailable:
             assert username != ss_module.KEYRING_USERNAME
         for _service, username in fake.get_calls:
             assert username != ss_module.KEYRING_USERNAME
+
+
+class _StorageFakeKeyring:
+    """In-memory keyring fake that round-trips set/get/delete.
+
+    Lets save_session_blob/load_session roundtrip without touching the
+    real Keychain or the host filesystem.
+    """
+
+    def __init__(self):
+        self._store = {}
+
+    def set_password(self, service, username, value):
+        self._store[(service, username)] = value
+
+    def get_password(self, service, username):
+        return self._store.get((service, username))
+
+    def delete_password(self, service, username):
+        self._store.pop((service, username), None)
+
+
+@pytest.fixture
+def storage_keyring(monkeypatch):
+    """Install a roundtrip-capable fake keyring and return a fresh session."""
+    fake = _StorageFakeKeyring()
+    module = types.ModuleType("keyring")
+    module.set_password = fake.set_password
+    module.get_password = fake.get_password
+    module.delete_password = fake.delete_password
+    monkeypatch.setitem(sys.modules, "keyring", module)
+
+    session = ss_module.SecureMonarchSession()
+    # __init__ ran the probe and set _use_keyring=True via the fake.
+    assert session._use_keyring is True
+    return session, fake
+
+
+class TestSessionStorageRoundTrip:
+    """save_session_blob → load_session must round-trip every supported shape."""
+
+    def test_token_mode_roundtrip(self, storage_keyring):
+        session, _ = storage_keyring
+        session.save_session_blob(
+            token="tok-abc",
+            device_uuid="dev-xyz",
+            auth_mode="token",
+        )
+
+        loaded = session.load_session()
+        assert loaded == {
+            "token": "tok-abc",
+            "device_uuid": "dev-xyz",
+            "auth_mode": "token",
+        }
+
+    def test_cookie_mode_roundtrip_preserves_nested_dict(self, storage_keyring):
+        """Cookies must come back as a nested dict, not flattened to strings."""
+        session, _ = storage_keyring
+        cookies = {
+            "session_id": "session-value",
+            "csrftoken": "csrf-value",
+            "cf_clearance": "cf-value",
+        }
+        session.save_session_blob(
+            cookies=cookies,
+            device_uuid="dev-xyz",
+            auth_mode="cookie",
+        )
+
+        loaded = session.load_session()
+        assert loaded is not None
+        assert loaded["auth_mode"] == "cookie"
+        assert loaded["cookies"] == cookies
+        assert loaded["device_uuid"] == "dev-xyz"
+
+    def test_cookie_mode_with_token_fallback(self, storage_keyring):
+        """When cookies and a token coexist, both must round-trip."""
+        session, _ = storage_keyring
+        session.save_session_blob(
+            token="tok-abc",
+            cookies={"session_id": "s", "csrftoken": "c"},
+            device_uuid="dev",
+            auth_mode="cookie",
+        )
+
+        loaded = session.load_session()
+        assert loaded["auth_mode"] == "cookie"
+        assert loaded["token"] == "tok-abc"
+        assert loaded["cookies"] == {"session_id": "s", "csrftoken": "c"}
+
+    def test_requires_token_or_cookies(self, storage_keyring):
+        session, _ = storage_keyring
+        with pytest.raises(ValueError):
+            session.save_session_blob(auth_mode="token")
+
+
+class TestBackwardCompatLoading:
+    """Existing keyring entries must keep working after the cookie upgrade."""
+
+    def test_legacy_bare_token_string(self, storage_keyring):
+        """Very old installs stored the raw token as the keyring value."""
+        session, fake = storage_keyring
+        fake.set_password(
+            ss_module.KEYRING_SERVICE,
+            ss_module.KEYRING_USERNAME,
+            "legacy-bare-token",
+        )
+
+        loaded = session.load_session()
+        assert loaded == {"token": "legacy-bare-token", "auth_mode": "token"}
+
+    def test_pre_cookie_json_blob(self, storage_keyring):
+        """Pre-cookie entries had token + device_uuid but no auth_mode key."""
+        session, fake = storage_keyring
+        fake.set_password(
+            ss_module.KEYRING_SERVICE,
+            ss_module.KEYRING_USERNAME,
+            '{"token": "t", "device_uuid": "d"}',
+        )
+
+        loaded = session.load_session()
+        assert loaded["token"] == "t"
+        assert loaded["device_uuid"] == "d"
+        # Without an explicit auth_mode and no cookies, default to "token".
+        assert loaded["auth_mode"] == "token"
+
+    def test_blob_with_cookies_defaults_to_cookie_mode(self, storage_keyring):
+        """If a blob has cookies but no auth_mode, infer cookie mode."""
+        session, fake = storage_keyring
+        fake.set_password(
+            ss_module.KEYRING_SERVICE,
+            ss_module.KEYRING_USERNAME,
+            '{"cookies": {"session_id": "s", "csrftoken": "c"}}',
+        )
+
+        loaded = session.load_session()
+        assert loaded["cookies"] == {"session_id": "s", "csrftoken": "c"}
+        assert loaded["auth_mode"] == "cookie"
+
+    def test_missing_token_and_cookies_returns_none(self, storage_keyring):
+        """A blob with neither credential type is unusable."""
+        session, fake = storage_keyring
+        fake.set_password(
+            ss_module.KEYRING_SERVICE,
+            ss_module.KEYRING_USERNAME,
+            '{"auth_mode": "token", "device_uuid": "d"}',
+        )
+
+        assert session.load_session() is None
+
+
+class TestGetAuthenticatedClient:
+    """get_authenticated_client must dispatch on the stored auth_mode."""
+
+    def test_cookie_mode_calls_set_cookies_on_client(self, storage_keyring, monkeypatch):
+        session, _ = storage_keyring
+        session.save_session_blob(
+            cookies={"session_id": "s", "csrftoken": "c"},
+            auth_mode="cookie",
+        )
+
+        # Capture what set_cookies is invoked with.
+        fake_client = MagicMock()
+        monkeypatch.setattr(
+            ss_module, "create_monarch_client", lambda **kwargs: fake_client
+        )
+
+        client = session.get_authenticated_client()
+        assert client is fake_client
+        fake_client.set_cookies.assert_called_once_with(
+            {"session_id": "s", "csrftoken": "c"}
+        )
+
+    def test_token_mode_does_not_call_set_cookies(self, storage_keyring, monkeypatch):
+        session, _ = storage_keyring
+        session.save_session_blob(
+            token="tok",
+            device_uuid="dev",
+            auth_mode="token",
+        )
+
+        fake_client = MagicMock()
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return fake_client
+
+        monkeypatch.setattr(ss_module, "create_monarch_client", fake_create)
+
+        client = session.get_authenticated_client()
+        assert client is fake_client
+        assert captured == {"token": "tok", "device_uuid": "dev"}
+        fake_client.set_cookies.assert_not_called()
+
+    def test_no_session_returns_none(self, storage_keyring):
+        session, _ = storage_keyring
+        assert session.get_authenticated_client() is None

@@ -2,7 +2,10 @@ from monarch_mcp_server.tools.budgets import BUDGET_QUERY, format_budget_data
 
 
 def test_budget_query_avoids_stale_category_group_fields():
-    query_text = BUDGET_QUERY.loc.source.body
+    # gql 4.0 returns a GraphQLRequest wrapping the parsed DocumentNode;
+    # the source string lives on document.loc.source.body. Earlier gql 3.x
+    # exposed .loc directly on the gql() return value.
+    query_text = BUDGET_QUERY.document.loc.source.body
 
     assert "budgetVariability" not in query_text
     assert "rolloverPeriod" not in query_text

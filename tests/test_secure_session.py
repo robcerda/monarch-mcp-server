@@ -334,3 +334,38 @@ class TestGetAuthenticatedClient:
     def test_no_session_returns_none(self, storage_keyring):
         session, _ = storage_keyring
         assert session.get_authenticated_client() is None
+
+
+class TestFileFallbackPermissions:
+    """The plaintext file fallback must never expose the token to other users."""
+
+    def test_token_file_created_locked_not_via_write_text(self, tmp_path, monkeypatch):
+        """The token file must be created already locked to 0600, not written
+        world-readable and chmod'd afterward (which leaves a race window)."""
+        import stat as _stat
+
+        monkeypatch.setattr(ss_module, "_TOKEN_DIR", tmp_path / "store")
+        monkeypatch.setattr(ss_module, "_TOKEN_FILE", tmp_path / "store" / "token")
+
+        # A revert to write_text()-then-chmod would trip this and fail loudly.
+        def _boom(*_a, **_k):
+            raise AssertionError("token file must not be created via write_text()")
+
+        monkeypatch.setattr(ss_module.Path, "write_text", _boom)
+
+        create_modes = []
+        real_open = ss_module.os.open
+
+        def _recording_open(path, flags, mode=0o777):
+            create_modes.append(mode)
+            return real_open(path, flags, mode)
+
+        monkeypatch.setattr(ss_module.os, "open", _recording_open)
+
+        session = ss_module.SecureMonarchSession()
+        session._save_token_file("super-secret-token")
+
+        token_file = tmp_path / "store" / "token"
+        assert token_file.read_text() == "super-secret-token"
+        assert create_modes and all(m == 0o600 for m in create_modes)
+        assert _stat.S_IMODE(token_file.stat().st_mode) == 0o600

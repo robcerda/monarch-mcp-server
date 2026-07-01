@@ -72,10 +72,20 @@ class SecureMonarchSession:
 
     def _save_token_file(self, token: str) -> None:
         _TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-        # Write with owner-only permissions
-        _TOKEN_FILE.write_text(token)
-        _TOKEN_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 600
         _TOKEN_DIR.chmod(stat.S_IRWXU)  # 700
+        # Create the file already locked to owner-only (0600) instead of
+        # write_text()-then-chmod, which leaves a window where the token is
+        # world-readable under a default umask.
+        fd = os.open(
+            _TOKEN_FILE,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        with os.fdopen(fd, "w") as f:
+            f.write(token)
+        # O_CREAT honors the mode only when creating; enforce it for an
+        # existing file too.
+        _TOKEN_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 600
         logger.info(f"✅ Token saved to {_TOKEN_FILE}")
 
     def _load_token_file(self) -> Optional[str]:

@@ -8,9 +8,11 @@ from monarch_mcp_server.tools.budgets import get_budgets
 class TestGetBudgets:
     async def test_returns_formatted_category_rows(self):
         result = json.loads(await get_budgets())
-        assert isinstance(result, list)
-        assert len(result) == 2
-        groceries = next(row for row in result if row["id"] == "cat-1")
+        assert isinstance(result, dict)
+        assert set(result) >= {"categories", "flex_bucket", "section_totals"}
+        rows = result["categories"]
+        assert len(rows) == 2
+        groceries = next(row for row in rows if row["id"] == "cat-1")
         assert groceries == {
             "id": "cat-1",
             "name": "Groceries",

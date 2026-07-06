@@ -16,8 +16,16 @@ logger = logging.getLogger(__name__)
 
 # The upstream SDK's get_budgets() requests category-group fields (e.g.
 # budgetVariability/rolloverPeriod) that Monarch's current API rejects for some
-# accounts, so it can fail outright. This narrower query asks only for fields
-# the current API still returns.
+# accounts, so it can fail outright. This query asks only for fields the current
+# API still returns.
+#
+# Alongside the per-category amounts it pulls the Flex-budget context those
+# amounts alone can't convey: under "Fixed & Flexible" budgeting the real
+# flexible budget is a single "flex bucket" total (``monthlyAmountsForFlexExpense``)
+# that the per-category flex sub-budgets do NOT sum to, and ``totalsByMonth`` gives
+# the Fixed / Non-Monthly / Flexible / overall rollups the way Monarch computes
+# them. Both live on ``budgetData`` and don't touch the guarded category-group
+# fields above.
 BUDGET_QUERY = gql(
     """
     query MCPBudgetData($startDate: Date!, $endDate: Date!) {
@@ -31,6 +39,50 @@ BUDGET_QUERY = gql(
             month
             plannedCashFlowAmount
             plannedSetAsideAmount
+            actualAmount
+            remainingAmount
+            __typename
+          }
+          __typename
+        }
+        monthlyAmountsForFlexExpense {
+          monthlyAmounts {
+            month
+            plannedCashFlowAmount
+            actualAmount
+            remainingAmount
+            __typename
+          }
+          __typename
+        }
+        totalsByMonth {
+          month
+          totalIncome {
+            plannedAmount
+            actualAmount
+            remainingAmount
+            __typename
+          }
+          totalExpenses {
+            plannedAmount
+            actualAmount
+            remainingAmount
+            __typename
+          }
+          totalFixedExpenses {
+            plannedAmount
+            actualAmount
+            remainingAmount
+            __typename
+          }
+          totalNonMonthlyExpenses {
+            plannedAmount
+            actualAmount
+            remainingAmount
+            __typename
+          }
+          totalFlexibleExpenses {
+            plannedAmount
             actualAmount
             remainingAmount
             __typename
@@ -80,7 +132,14 @@ async def get_budget_data(
 
 
 def format_budget_data(budget_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Format Monarch budget data into one row per category/month."""
+    """Format Monarch budget data into one row per category/month.
+
+    NOTE: for categories in the Flexible bucket the per-category ``planned`` is
+    only a guideline sub-budget — the real flexible budget is the single
+    flex-bucket total (see ``format_flex_bucket``), which these sub-budgets do
+    not sum to. Analyze flexible spending against the flex bucket / section
+    totals, not these per-category planned amounts.
+    """
     category_lookup: Dict[str, Dict[str, Optional[str]]] = {}
     for group in budget_data.get("categoryGroups", []):
         for category in group.get("categories", []):
@@ -114,6 +173,64 @@ def format_budget_data(budget_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return budget_rows
 
 
+def format_flex_bucket(budget_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Format the Flex-bucket total per month.
+
+    Under Fixed & Flexible budgeting the flexible budget is a single "flex
+    bucket" amount set independently of the flex sub-categories. This is the
+    number that actually counts toward the budget, so compare total flexible
+    *spend* against this — not against the sum of the flex category sub-budgets.
+    """
+    flex = (budget_data.get("budgetData", {}) or {}).get(
+        "monthlyAmountsForFlexExpense"
+    ) or {}
+    rows = []
+    for monthly_amount in flex.get("monthlyAmounts", []):
+        rows.append(
+            {
+                "month": monthly_amount.get("month"),
+                "planned": monthly_amount.get("plannedCashFlowAmount"),
+                "actual": monthly_amount.get("actualAmount"),
+                "remaining": monthly_amount.get("remainingAmount"),
+            }
+        )
+    return rows
+
+
+def _totals(node: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    node = node or {}
+    return {
+        "planned": node.get("plannedAmount"),
+        "actual": node.get("actualAmount"),
+        "remaining": node.get("remainingAmount"),
+    }
+
+
+def format_section_totals(budget_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Format the per-month section rollups the way Monarch computes them.
+
+    Total budget = Fixed + Non-Monthly + Flex bucket (NOT the sum of individual
+    flex categories). Fixed and Non-Monthly totals auto-sum from their
+    sub-budgets; the Flexible total is the flex bucket.
+    """
+    totals_by_month = (budget_data.get("budgetData", {}) or {}).get(
+        "totalsByMonth", []
+    )
+    rows = []
+    for month_totals in totals_by_month:
+        rows.append(
+            {
+                "month": month_totals.get("month"),
+                "income": _totals(month_totals.get("totalIncome")),
+                "total_expenses": _totals(month_totals.get("totalExpenses")),
+                "fixed": _totals(month_totals.get("totalFixedExpenses")),
+                "non_monthly": _totals(month_totals.get("totalNonMonthlyExpenses")),
+                "flexible": _totals(month_totals.get("totalFlexibleExpenses")),
+            }
+        )
+    return rows
+
+
 @mcp.tool()
 async def get_budgets(
     start_date: Optional[str] = None,
@@ -127,15 +244,34 @@ async def get_budgets(
         end_date: End month in YYYY-MM-DD format (defaults to the current month)
 
     Returns:
-        A JSON list with one row per budgeted category per month. Each row has:
-        ``id`` (category id), ``name`` (category name), ``planned`` (planned
-        cash-flow amount), ``actual`` (actual amount), ``remaining``,
-        ``category_group`` (group name), and ``month`` (YYYY-MM-DD).
+        A JSON object with three keys:
+
+        ``categories``: one row per budgeted category per month, each with
+            ``id``, ``name``, ``planned`` (planned cash-flow amount), ``actual``,
+            ``remaining``, ``category_group``, and ``month`` (YYYY-MM-DD).
+        ``flex_bucket``: the Flex-bucket total per month (``month``, ``planned``,
+            ``actual``, ``remaining``). Under Fixed & Flexible budgeting THIS is
+            the real flexible budget — the flex categories' ``planned`` values are
+            only guidelines and do NOT sum to it. Compare total flexible spend
+            against this.
+        ``section_totals``: per-month rollups (``fixed``, ``non_monthly``,
+            ``flexible``, ``total_expenses``, ``income``), each with
+            ``planned`` / ``actual`` / ``remaining``. Total budget = Fixed +
+            Non-Monthly + Flex bucket.
+
+        (For category-based budgets not using Flex, ``flex_bucket`` /
+        ``section_totals`` may be empty; use ``categories``.)
     """
     try:
         client = await get_monarch_client()
         budget_data = await get_budget_data(client, start_date, end_date)
-        return json_success(format_budget_data(budget_data))
+        return json_success(
+            {
+                "categories": format_budget_data(budget_data),
+                "flex_bucket": format_flex_bucket(budget_data),
+                "section_totals": format_section_totals(budget_data),
+            }
+        )
     except Exception as e:
         return json_error("get_budgets", e)
 

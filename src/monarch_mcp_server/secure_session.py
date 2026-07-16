@@ -5,10 +5,12 @@ Uses the system keyring when available, with an automatic file-based
 fallback for environments without a keyring backend (e.g. WSL, headless Linux).
 """
 
+import base64
 import json
 import logging
 import os
 import stat
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 from monarchmoney import MonarchMoney
@@ -30,6 +32,53 @@ _TOKEN_FILE = _TOKEN_DIR / "token"
 
 
 _PROBE_USERNAME = "__keyring_probe__"
+
+
+# --- Windows DPAPI encryption for the file fallback -------------------------
+#
+# On Windows the keyring backend (Credential Manager) has a hard size limit on
+# the credential blob, so a full cookie session (~1 KB+) cannot be stored there
+# and we fall back to a file. To avoid leaving that file as plaintext, we
+# encrypt it at rest with DPAPI (CryptProtectData), scoped to the current user
+# — the same per-user protection Credential Manager itself uses, without the
+# size cap. On non-Windows platforms this is a no-op and the file stays as-is.
+_DPAPI_PREFIX = "DPAPI:"
+
+
+def _dpapi_available() -> bool:
+    """True only on Windows with pywin32's win32crypt importable."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import win32crypt  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _dpapi_encrypt(plaintext: str) -> str:
+    """Encrypt a string with DPAPI; returns ``DPAPI:<base64>``."""
+    import win32crypt
+
+    blob = win32crypt.CryptProtectData(
+        plaintext.encode("utf-8"),
+        "monarch-mcp-server session",  # description (not secret)
+        None,
+        None,
+        None,
+        0,
+    )
+    return _DPAPI_PREFIX + base64.b64encode(blob).decode("ascii")
+
+
+def _dpapi_decrypt(payload: str) -> str:
+    """Decrypt a ``DPAPI:<base64>`` string produced by :func:`_dpapi_encrypt`."""
+    import win32crypt
+
+    raw = base64.b64decode(payload[len(_DPAPI_PREFIX):])
+    # CryptUnprotectData returns (description, data).
+    _desc, data = win32crypt.CryptUnprotectData(raw, None, None, None, 0)
+    return data.decode("utf-8")
 
 
 def _keyring_available() -> bool:
@@ -72,19 +121,45 @@ class SecureMonarchSession:
 
     def _save_token_file(self, token: str) -> None:
         _TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+        # Encrypt at rest with DPAPI on Windows; plaintext elsewhere.
+        if _dpapi_available():
+            data = _dpapi_encrypt(token)
+            how = "DPAPI-encrypted"
+        else:
+            data = token
+            how = "plaintext"
         # Write with owner-only permissions
-        _TOKEN_FILE.write_text(token)
+        _TOKEN_FILE.write_text(data)
         _TOKEN_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 600
         _TOKEN_DIR.chmod(stat.S_IRWXU)  # 700
-        logger.info(f"✅ Token saved to {_TOKEN_FILE}")
+        logger.info(f"✅ Token saved ({how}) to {_TOKEN_FILE}")
 
     def _load_token_file(self) -> Optional[str]:
-        if _TOKEN_FILE.is_file():
-            token = _TOKEN_FILE.read_text().strip()
-            if token:
-                logger.info(f"✅ Token loaded from {_TOKEN_FILE}")
+        if not _TOKEN_FILE.is_file():
+            return None
+        raw = _TOKEN_FILE.read_text().strip()
+        if not raw:
+            return None
+
+        if raw.startswith(_DPAPI_PREFIX):
+            try:
+                token = _dpapi_decrypt(raw)
+                logger.info(f"✅ Token loaded (DPAPI-encrypted) from {_TOKEN_FILE}")
                 return token
-        return None
+            except Exception as e:
+                logger.warning(f"⚠️  Could not decrypt token file: {e}")
+                return None
+
+        # Legacy plaintext file. Migrate it to encrypted-at-rest transparently
+        # when DPAPI is available, then return the value.
+        logger.info(f"✅ Token loaded (plaintext) from {_TOKEN_FILE}")
+        if _dpapi_available():
+            try:
+                self._save_token_file(raw)
+                logger.info("🔐 Migrated plaintext token file to DPAPI-encrypted at rest")
+            except Exception as e:
+                logger.warning(f"⚠️  Could not migrate token file to encrypted: {e}")
+        return raw
 
     def _delete_token_file(self) -> None:
         if _TOKEN_FILE.is_file():

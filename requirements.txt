@@ -1,4 +1,4 @@
-mcp[cli]>=1.10.0
+mcp[cli]>=1.10.0,<2.0.0
 monarchmoneycommunity>=1.4.0
 gql>=3.4
 keyring>=24.0.0

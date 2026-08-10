@@ -451,7 +451,7 @@ Then fully quit and reopen Claude Desktop or Claude Code so it relaunches the se
 monarch-mcp-server/
 ├── src/monarch_mcp_server/
 │   ├── __init__.py
-│   ├── app.py             # FastMCP app instance and entry point
+│   ├── app.py             # MCPServer app instance and entry point
 │   ├── client.py          # Cached MonarchMoney client factory
 │   ├── monarch_auth.py    # Current Monarch auth compatibility (host, email OTP, device-uuid)
 │   ├── secure_session.py  # Keyring-backed token storage (file fallback)

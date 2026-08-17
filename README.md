@@ -230,8 +230,10 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 - **Split Transaction**: Divide a single transaction into multiple parts with different categories or merchants
 
 ### 💵 Budget Management
-- **Get Budgets**: Access budget information including spent amounts and remaining balances by category
+- **Get Budgets**: Budget information by category (including rollover and set-aside), the all-up **Flexible** bucket, category-group roll-ups, savings-goal contributions, the account's budget system, and per-month income / expense / fixed / flexible / non-monthly totals
 - **Set Budget Amount**: Create or modify budget amounts for any category or category group
+- **Set Flexible Budget**: Set the bucket-level Flexible amount used by Monarch's "fixed_and_flex" budget system
+- **Update Flex Rollover Settings**: Start a fresh Flex rollover period, for buckets that have accumulated a large negative rollover
 
 ### 📈 Net Worth Tracking
 - **Get Net Worth**: Track total net worth over time with daily snapshots and trend analysis
@@ -259,8 +261,10 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 | `check_auth_status` | Check authentication status | None |
 | `get_accounts` | Get all financial accounts | None |
 | `get_transactions` | Get transactions with filtering and reconciliation fields | `limit`, `offset`, `start_date`, `end_date`, `account_id`, `account_ids`, `category_ids`, `category_group_ids`, `tag_ids`, `search`, `wide_search`, `search_scan_limit`, `has_notes`, `is_split`, `is_recurring` |
-| `get_budgets` | Get budget information | `start_date`, `end_date` |
+| `get_budgets` | Get budget information, including the Flexible bucket | `start_date`, `end_date` (pass both or neither) |
 | `set_budget_amount` | Set budget for a category | `amount`, `category_id`, `category_group_id`, `start_date`, `apply_to_future` |
+| `set_flexible_budget` | Set the all-up Flexible bucket amount | `amount`, `start_date`, `apply_to_future` |
+| `update_flex_rollover_settings` | Start a new Flex rollover period (**discards accumulated rollover**) | `rollover_start_month`, `rollover_starting_balance`, `rollover_enabled` |
 | `get_cashflow` | Get cashflow analysis | `start_date`, `end_date` |
 | `get_net_worth` | Get net worth history | `start_date`, `end_date`, `account_type` |
 | `get_account_balance_history` | Get account balance history | `account_id` |
@@ -312,6 +316,48 @@ Show me my last 50 transactions using get_transactions with limit 50
 ### Check Spending vs Budget
 ```
 Use get_budgets to show my current budget status
+```
+
+`get_budgets` returns a JSON object with `budget_system`, `data` (one row per category per month), `flex`, `groups`, `goals` and `totals`.
+
+**Two things that will produce wrong numbers if ignored:**
+
+1. **Income and expense amounts are both positive magnitudes.** The sign does not distinguish them — negatives appear only for contra entries. Summing `planned` across all `data` rows adds income to spending. Filter on `category_type` (`income` / `expense` / `transfer`) first.
+2. **Under flex budgeting most category rows carry no standalone budget.** Rows whose `budget_variability` is `flexible` are pooled into the single Flexible bucket, so their individual `planned` values are typically 0 and the real number lives in `flex`. On a flex-budgeting account the majority of rows are usually pooled this way, so adding up the category rows understates planned spending by the whole size of the Flexible bucket. Compare against `totals[].expenses` rather than trusting a row sum.
+
+`flex.status` is one of:
+
+- `ok` — a Flexible bucket amount was returned
+- `not_configured` — the account has no Flexible bucket (e.g. it is not on flex budgeting)
+- `unsupported` — Monarch rejected the extended fields, so the narrower fallback query ran
+
+A status other than `ok` means **no amount is available — it does not mean zero**. When it is `unsupported`, `groups`, `goals`, `totals`, `budget_system` and each row's `rollover` / `rollover_type` / `budget_variability` are all `null` for the same reason.
+
+For `groups`, `goals` and `totals`, `null` means "could not be fetched" while `[]` means "asked, and there were none".
+
+Per-row, `planned - actual` equals `remaining` only when `rollover` is zero; for rollover categories the carried balance accounts for the difference.
+
+**Never add a group's `planned` to its categories' `planned`** — that double-counts either way. `group_level_budgeting` tells you which level holds the real budget: when `true` the group does and its categories carry none; when `false` the group row is only the roll-up of those same categories.
+
+Full response shape:
+
+| Key | Contents |
+|---|---|
+| `tool`, `args` | echo of the call |
+| `budget_system` | e.g. `"fixed_and_flex"`, or `null` |
+| `data[]` | `id`, `name`, `planned`, `actual`, `remaining`, `set_aside`, `rollover`, `rollover_type`, `category_group`, `category_type`, `budget_variability`, `month` |
+| `flex` | `status`, `budget_variability`, `monthly[]` (`month`, `planned`, `actual`, `remaining`, `rollover`, `rollover_type`) |
+| `groups[]` | `id`, `name`, `planned`, `actual`, `remaining`, `rollover`, `rollover_type`, `category_type`, `group_level_budgeting`, `month` |
+| `goals[]` | `id`, `name`, `priority`, `archived`, `completed`, `planned_contributions[]`, `actual_contributions[]` |
+| `totals[]` | `month`, plus `income` / `expenses` / `flexible` / `fixed` / `non_monthly`, each `planned`, `actual`, `remaining`, `rollover` |
+
+Goal contributions are a **separate** quantity from a category's `set_aside`; adding them together double-counts.
+
+`start_date` and `end_date` must be passed **together or not at all** — supplying only one is rejected rather than filled in, because completing the missing side from today can invert the range and return an empty result that reads as "no budget".
+
+### Set the Flexible Bucket Amount
+```
+Set my flexible budget to $1,500 for this month using set_flexible_budget
 ```
 
 ### Set a Budget Amount
@@ -478,7 +524,11 @@ monarch-mcp-server/
 
 ### Recommended: require approval for mutating tools
 
-Several tools mutate your Monarch ledger (`create_transaction`, `update_transaction`, `delete_transaction`, `bulk_categorize_transactions`, `upload_account_balance_history`, `set_transaction_tags`, `create_transaction_rule`, `update_transaction_rule`, `delete_transaction_rule`, `split_transaction`, `set_budget_amount`, `update_merchant`, `review_recurring_stream`).
+Several tools mutate your Monarch ledger (`create_transaction`, `update_transaction`, `delete_transaction`, `bulk_categorize_transactions`, `upload_account_balance_history`, `set_transaction_tags`, `create_transaction_rule`, `update_transaction_rule`, `delete_transaction_rule`, `split_transaction`, `set_budget_amount`, `set_flexible_budget`, `update_flex_rollover_settings`, `update_merchant`, `review_recurring_stream`, `categorize_transaction`, `update_transaction_notes`, `mark_transaction_reviewed`, `add_transaction_tag`, `create_transaction_tag`, `create_transaction_category`, `update_category`).
+
+Note `update_category` also carries rollover-reset arguments (`rollover_start_month`, `rollover_starting_balance`), so it can discard a category's accumulated rollover — see issue #107.
+
+`update_flex_rollover_settings` deserves particular care: it discards the Flex bucket's accumulated rollover balance and starts a fresh period. Its two destructive arguments are deliberately required rather than defaulted, so it cannot be invoked as a no-argument "reset", but it should still be approved manually every time.
 
 Because the LLM can be influenced by data it reads back (a malicious-looking memo or merchant name in a transaction), the safest setup is to configure your MCP client to require manual approval before any mutating tool runs. In Claude Desktop and Claude Code this is the default behavior for unknown tools; keep it that way for the tools listed above rather than allow-listing them.
 

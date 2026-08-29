@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime as dt
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
@@ -10,17 +10,59 @@ from monarch_mcp_server.helpers import json_success, json_error
 
 logger = logging.getLogger(__name__)
 
+# Upstream returns every aggregate bucket it has, and a busy month runs to well
+# over a hundred merchants. Stripping the GraphQL noise gets most ranges under
+# the MCP response ceiling on its own, so only trim rows when the response would
+# actually overflow. Ladder of per-breakdown caps to try, largest first.
+MAX_CASHFLOW_RESPONSE_CHARS = 45_000
+_CASHFLOW_LIMIT_LADDER = (100, 50, 20, 10, 5)
+
+_CASHFLOW_AGGREGATE_KEYS = ("byCategory", "byCategoryGroup", "byMerchant", "summary")
+
+
+def _strip_typenames(value: Any) -> Any:
+    """Recursively drop GraphQL ``__typename`` keys from a payload."""
+    if isinstance(value, dict):
+        return {k: _strip_typenames(v) for k, v in value.items() if k != "__typename"}
+    if isinstance(value, list):
+        return [_strip_typenames(item) for item in value]
+    return value
+
+
+def _breakdown(rows: List[Dict[str, Any]], limit: Optional[int]) -> Dict[str, Any]:
+    """Wrap ranked ``rows`` so any cap applied is visible to the caller."""
+    capped = rows[:limit] if limit else rows
+    return {
+        "total": len(rows),
+        "returned": len(capped),
+        "truncated": len(capped) < len(rows),
+        "rows": capped,
+    }
+
 
 @mcp.tool()
 async def get_cashflow(
-    start_date: Optional[str] = None, end_date: Optional[str] = None
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: Optional[int] = None,
 ) -> str:
     """
     Get cashflow analysis from Monarch Money.
 
+    Returns overall income, expenses, savings and savings rate for the period,
+    plus breakdowns by category, category group, and merchant, each ranked by
+    absolute cash flow.
+
+    Every row is returned when the response fits. Only if it would overflow the
+    MCP response limit are the smallest rows trimmed, and each breakdown reports
+    its true total so nothing is dropped silently.
+
     Args:
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format
+        limit: Optional hard cap on rows per breakdown. Leave unset to return
+               everything that fits. Use 0 to disable trimming entirely — a wide
+               date range can then exceed the response limit.
     """
     try:
         client = await get_monarch_client()
@@ -32,7 +74,94 @@ async def get_cashflow(
             filters["end_date"] = end_date
 
         cashflow = await client.get_cashflow(**filters)
-        return json_success(cashflow)
+
+        # Be forgiving if upstream ever changes shape: pass the payload through
+        # rather than silently reporting an empty cashflow.
+        if not any(key in cashflow for key in _CASHFLOW_AGGREGATE_KEYS):
+            return json_success(_strip_typenames(cashflow))
+
+        by_category: List[Dict[str, Any]] = []
+        for item in cashflow.get("byCategory", []):
+            cat = item.get("groupBy", {}).get("category") or {}
+            group = cat.get("group") or {}
+            by_category.append(
+                {
+                    "category": cat.get("name"),
+                    "category_id": cat.get("id"),
+                    "icon": cat.get("icon"),
+                    "group_id": group.get("id"),
+                    "group_type": group.get("type"),
+                    "sum": item.get("summary", {}).get("sum", 0),
+                }
+            )
+        by_category.sort(key=lambda x: abs(x.get("sum") or 0), reverse=True)
+
+        by_category_group: List[Dict[str, Any]] = []
+        for item in cashflow.get("byCategoryGroup", []):
+            grp = item.get("groupBy", {}).get("categoryGroup") or {}
+            by_category_group.append(
+                {
+                    "group": grp.get("name"),
+                    "group_id": grp.get("id"),
+                    "group_type": grp.get("type"),
+                    "sum": item.get("summary", {}).get("sum", 0),
+                }
+            )
+        by_category_group.sort(key=lambda x: abs(x.get("sum") or 0), reverse=True)
+
+        by_merchant: List[Dict[str, Any]] = []
+        for item in cashflow.get("byMerchant", []):
+            merch = item.get("groupBy", {}).get("merchant") or {}
+            summary = item.get("summary", {})
+            by_merchant.append(
+                {
+                    "merchant": merch.get("name"),
+                    "merchant_id": merch.get("id"),
+                    "income": summary.get("sumIncome", 0),
+                    "expense": summary.get("sumExpense", 0),
+                }
+            )
+        # Rank on total flow, not expense alone: a payroll or transfer merchant
+        # can be the largest line in the period and must survive the cap.
+        by_merchant.sort(
+            key=lambda x: abs(x.get("income") or 0) + abs(x.get("expense") or 0),
+            reverse=True,
+        )
+
+        overall: Dict[str, Any] = {}
+        summary_items = cashflow.get("summary", [])
+        if summary_items:
+            s = summary_items[0].get("summary", {})
+            overall = {
+                "total_income": s.get("sumIncome", 0),
+                "total_expenses": s.get("sumExpense", 0),
+                "savings": s.get("savings", 0),
+                "savings_rate": s.get("savingsRate", 0),
+            }
+
+        def render(applied: Optional[int]) -> str:
+            return json_success(
+                {
+                    "period": {"start_date": start_date, "end_date": end_date},
+                    "limit": applied,
+                    **overall,
+                    "by_category": _breakdown(by_category, applied),
+                    "by_category_group": _breakdown(by_category_group, applied),
+                    "by_merchant": _breakdown(by_merchant, applied),
+                }
+            )
+
+        # An explicit limit is the caller's call, including 0 for "never trim".
+        if limit is not None:
+            return render(limit or None)
+
+        # Otherwise return everything, stepping the cap down only far enough to
+        # fit under the response ceiling.
+        for applied in (None, *_CASHFLOW_LIMIT_LADDER):
+            rendered = render(applied)
+            if len(rendered) <= MAX_CASHFLOW_RESPONSE_CHARS:
+                return rendered
+        return rendered
     except Exception as e:
         return json_error("get_cashflow", e)
 
@@ -80,29 +209,31 @@ async def get_net_worth(
 
         snapshots = result.get("aggregateSnapshots", [])
 
-        formatted: Dict[str, Any] = {
-            "snapshot_count": len(snapshots),
-            "snapshots": []
-        }
+        formatted: Dict[str, Any] = {"snapshot_count": len(snapshots), "snapshots": []}
 
         if snapshots:
-            values = [s.get("balance", 0) for s in snapshots if s.get("balance") is not None]
+            values = [
+                s.get("balance", 0) for s in snapshots if s.get("balance") is not None
+            ]
             if values:
                 formatted["current_net_worth"] = values[-1] if values else 0
                 formatted["earliest_net_worth"] = values[0] if values else 0
                 formatted["change"] = values[-1] - values[0] if len(values) > 1 else 0
                 formatted["change_percent"] = (
                     ((values[-1] - values[0]) / values[0] * 100)
-                    if values[0] != 0 and len(values) > 1 else 0
+                    if values[0] != 0 and len(values) > 1
+                    else 0
                 )
                 formatted["highest"] = max(values)
                 formatted["lowest"] = min(values)
 
         for snapshot in snapshots[-365:]:
-            formatted["snapshots"].append({
-                "date": snapshot.get("date"),
-                "net_worth": snapshot.get("balance"),
-            })
+            formatted["snapshots"].append(
+                {
+                    "date": snapshot.get("date"),
+                    "net_worth": snapshot.get("balance"),
+                }
+            )
 
         return json_success(formatted)
     except Exception as e:
@@ -136,10 +267,9 @@ async def get_net_worth_by_account_type(
     """
     try:
         if timeframe not in ("month", "year"):
-            return json_success({
-                "success": False,
-                "error": "timeframe must be 'month' or 'year'"
-            })
+            return json_success(
+                {"success": False, "error": "timeframe must be 'month' or 'year'"}
+            )
 
         client = await get_monarch_client()
         result = await client.get_account_snapshots_by_type(
@@ -154,7 +284,7 @@ async def get_net_worth_by_account_type(
         formatted: Dict[str, Any] = {
             "timeframe": timeframe,
             "start_date": start_date,
-            "account_types": []
+            "account_types": [],
         }
 
         # Group flat rows by accountType, preserving order of first appearance.
@@ -164,14 +294,18 @@ async def get_net_worth_by_account_type(
             if atype is None:
                 continue
             entry = grouped.setdefault(atype, {"type": atype, "snapshots": []})
-            entry["snapshots"].append({
-                "month": row.get("month"),
-                "balance": row.get("balance"),
-            })
+            entry["snapshots"].append(
+                {
+                    "month": row.get("month"),
+                    "balance": row.get("balance"),
+                }
+            )
 
         for type_info in grouped.values():
             if type_info["snapshots"]:
-                type_info["current_balance"] = type_info["snapshots"][-1].get("balance", 0)
+                type_info["current_balance"] = type_info["snapshots"][-1].get(
+                    "balance", 0
+                )
             formatted["account_types"].append(type_info)
 
         total = sum(

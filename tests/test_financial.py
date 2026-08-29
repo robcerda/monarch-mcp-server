@@ -3,11 +3,8 @@
 import copy
 import json
 
-from monarch_mcp_server.tools.financial import (
-    MAX_CASHFLOW_RESPONSE_CHARS,
-    _CASHFLOW_LIMIT_LADDER,
-    get_cashflow,
-)
+from monarch_mcp_server.helpers import LIMIT_LADDER, MAX_RESPONSE_CHARS
+from monarch_mcp_server.tools.financial import get_cashflow
 
 
 def _merchant_row(index: int, income: float, expense: float):
@@ -135,8 +132,8 @@ class TestGetCashflow:
         raw = await get_cashflow()
         result = json.loads(raw)
 
-        assert len(raw) <= MAX_CASHFLOW_RESPONSE_CHARS
-        assert result["limit"] in _CASHFLOW_LIMIT_LADDER
+        assert len(raw) <= MAX_RESPONSE_CHARS
+        assert result["limit"] in LIMIT_LADDER
         assert result["by_merchant"]["total"] == 4000
         assert result["by_merchant"]["truncated"] is True
         # Trimmed to fit, not slashed to the floor.
@@ -208,7 +205,7 @@ class TestGetCashflow:
         ]
         mock_monarch_client.get_cashflow.return_value = payload
 
-        assert len(await get_cashflow()) <= MAX_CASHFLOW_RESPONSE_CHARS
+        assert len(await get_cashflow()) <= MAX_RESPONSE_CHARS
 
     async def test_handles_unrecognized_payload_shape(self, mock_monarch_client):
         mock_monarch_client.get_cashflow.return_value = {

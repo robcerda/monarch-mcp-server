@@ -6,38 +6,17 @@ from typing import Any, Dict, List, Optional
 
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
-from monarch_mcp_server.helpers import json_success, json_error
+from monarch_mcp_server.helpers import (
+    breakdown,
+    json_error,
+    json_success,
+    render_within_budget,
+    strip_typenames,
+)
 
 logger = logging.getLogger(__name__)
 
-# Upstream returns every aggregate bucket it has, and a busy month runs to well
-# over a hundred merchants. Stripping the GraphQL noise gets most ranges under
-# the MCP response ceiling on its own, so only trim rows when the response would
-# actually overflow. Ladder of per-breakdown caps to try, largest first.
-MAX_CASHFLOW_RESPONSE_CHARS = 45_000
-_CASHFLOW_LIMIT_LADDER = (100, 50, 20, 10, 5)
-
 _CASHFLOW_AGGREGATE_KEYS = ("byCategory", "byCategoryGroup", "byMerchant", "summary")
-
-
-def _strip_typenames(value: Any) -> Any:
-    """Recursively drop GraphQL ``__typename`` keys from a payload."""
-    if isinstance(value, dict):
-        return {k: _strip_typenames(v) for k, v in value.items() if k != "__typename"}
-    if isinstance(value, list):
-        return [_strip_typenames(item) for item in value]
-    return value
-
-
-def _breakdown(rows: List[Dict[str, Any]], limit: Optional[int]) -> Dict[str, Any]:
-    """Wrap ranked ``rows`` so any cap applied is visible to the caller."""
-    capped = rows[:limit] if limit else rows
-    return {
-        "total": len(rows),
-        "returned": len(capped),
-        "truncated": len(capped) < len(rows),
-        "rows": capped,
-    }
 
 
 @mcp.tool()
@@ -78,7 +57,7 @@ async def get_cashflow(
         # Be forgiving if upstream ever changes shape: pass the payload through
         # rather than silently reporting an empty cashflow.
         if not any(key in cashflow for key in _CASHFLOW_AGGREGATE_KEYS):
-            return json_success(_strip_typenames(cashflow))
+            return json_success(strip_typenames(cashflow))
 
         by_category: List[Dict[str, Any]] = []
         for item in cashflow.get("byCategory", []):
@@ -145,23 +124,13 @@ async def get_cashflow(
                     "period": {"start_date": start_date, "end_date": end_date},
                     "limit": applied,
                     **overall,
-                    "by_category": _breakdown(by_category, applied),
-                    "by_category_group": _breakdown(by_category_group, applied),
-                    "by_merchant": _breakdown(by_merchant, applied),
+                    "by_category": breakdown(by_category, applied),
+                    "by_category_group": breakdown(by_category_group, applied),
+                    "by_merchant": breakdown(by_merchant, applied),
                 }
             )
 
-        # An explicit limit is the caller's call, including 0 for "never trim".
-        if limit is not None:
-            return render(limit or None)
-
-        # Otherwise return everything, stepping the cap down only far enough to
-        # fit under the response ceiling.
-        for applied in (None, *_CASHFLOW_LIMIT_LADDER):
-            rendered = render(applied)
-            if len(rendered) <= MAX_CASHFLOW_RESPONSE_CHARS:
-                return rendered
-        return rendered
+        return render_within_budget(render, limit)
     except Exception as e:
         return json_error("get_cashflow", e)
 

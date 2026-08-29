@@ -137,12 +137,124 @@ def mock_monarch_client():
         ],
     }
 
+    # Upstream get_cashflow returns the raw Common_GetCashFlowEntityAggregates
+    # payload: nested groupBy/summary wrappers, __typename on every node, and a
+    # merchant list that carries full logo URLs.
     client.get_cashflow.return_value = {
-        "cashflow": {
-            "income": 5000.00,
-            "expenses": -3200.00,
-            "savings": 1800.00,
-        }
+        "byCategory": [
+            {
+                "groupBy": {
+                    "category": {
+                        "id": "cat-1",
+                        "name": "Groceries",
+                        "icon": "🛒",
+                        "group": {
+                            "id": "grp-1",
+                            "type": "expense",
+                            "__typename": "CategoryGroup",
+                        },
+                        "__typename": "Category",
+                    },
+                    "__typename": "AggregateGroupBy",
+                },
+                "summary": {"sum": -3200.00, "__typename": "TransactionsSummary"},
+                "__typename": "AggregateData",
+            },
+            {
+                "groupBy": {
+                    "category": {
+                        "id": "cat-3",
+                        "name": "Paychecks",
+                        "icon": "💵",
+                        "group": {
+                            "id": "grp-2",
+                            "type": "income",
+                            "__typename": "CategoryGroup",
+                        },
+                        "__typename": "Category",
+                    },
+                    "__typename": "AggregateGroupBy",
+                },
+                "summary": {"sum": 5000.00, "__typename": "TransactionsSummary"},
+                "__typename": "AggregateData",
+            },
+        ],
+        "byCategoryGroup": [
+            {
+                "groupBy": {
+                    "categoryGroup": {
+                        "id": "grp-2",
+                        "name": "Income",
+                        "type": "income",
+                        "__typename": "CategoryGroup",
+                    },
+                    "__typename": "AggregateGroupBy",
+                },
+                "summary": {"sum": 5000.00, "__typename": "TransactionsSummary"},
+                "__typename": "AggregateData",
+            },
+            {
+                "groupBy": {
+                    "categoryGroup": {
+                        "id": "grp-1",
+                        "name": "Food",
+                        "type": "expense",
+                        "__typename": "CategoryGroup",
+                    },
+                    "__typename": "AggregateGroupBy",
+                },
+                "summary": {"sum": -3200.00, "__typename": "TransactionsSummary"},
+                "__typename": "AggregateData",
+            },
+        ],
+        "byMerchant": [
+            {
+                "groupBy": {
+                    "merchant": {
+                        "id": "mer-1",
+                        "name": "Whole Foods",
+                        "logoUrl": "https://res.cloudinary.com/monarch-money/x/wholefoods",
+                        "__typename": "Merchant",
+                    },
+                    "__typename": "AggregateGroupBy",
+                },
+                "summary": {
+                    "sumIncome": 0.00,
+                    "sumExpense": -3200.00,
+                    "__typename": "TransactionsSummary",
+                },
+                "__typename": "AggregateData",
+            },
+            {
+                "groupBy": {
+                    "merchant": {
+                        "id": "mer-2",
+                        "name": "Employer",
+                        "logoUrl": "https://res.cloudinary.com/monarch-money/x/employer",
+                        "__typename": "Merchant",
+                    },
+                    "__typename": "AggregateGroupBy",
+                },
+                "summary": {
+                    "sumIncome": 5000.00,
+                    "sumExpense": 0.00,
+                    "__typename": "TransactionsSummary",
+                },
+                "__typename": "AggregateData",
+            },
+        ],
+        "summary": [
+            {
+                "summary": {
+                    "sumIncome": 5000.00,
+                    "sumExpense": -3200.00,
+                    "savings": 1800.00,
+                    "savingsRate": 0.36,
+                    "__typename": "TransactionsSummary",
+                },
+                "__typename": "AggregateData",
+            }
+        ],
     }
 
     client.get_account_holdings.return_value = {

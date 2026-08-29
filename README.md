@@ -261,7 +261,7 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 | `get_transactions` | Get transactions with filtering and reconciliation fields | `limit`, `offset`, `start_date`, `end_date`, `account_id`, `account_ids`, `category_ids`, `category_group_ids`, `tag_ids`, `search`, `wide_search`, `search_scan_limit`, `has_notes`, `is_split`, `is_recurring` |
 | `get_budgets` | Get budget information | `start_date`, `end_date` |
 | `set_budget_amount` | Set budget for a category | `amount`, `category_id`, `category_group_id`, `start_date`, `apply_to_future` |
-| `get_cashflow` | Get cashflow analysis | `start_date`, `end_date` |
+| `get_cashflow` | Get cashflow analysis | `start_date`, `end_date`, `limit` |
 | `get_net_worth` | Get net worth history | `start_date`, `end_date`, `account_type` |
 | `get_account_balance_history` | Get account balance history | `account_id` |
 | `get_net_worth_by_account_type` | Get net worth by account type | `start_date`, `timeframe` |

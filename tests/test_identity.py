@@ -3,7 +3,7 @@
 import json
 from unittest.mock import AsyncMock, patch
 
-from monarch_mcp_server.tools.identity import monarch_whoami
+from monarch_mcp_server.tools.identity import get_household_members, monarch_whoami
 
 
 def _payload(**sub_overrides):
@@ -124,3 +124,45 @@ class TestMonarchWhoami:
 
         assert data["error"] is True
         assert data["tool"] == "monarch_whoami"
+
+
+class TestGetHouseholdMembers:
+    """Tests for get_household_members tool."""
+
+    @patch('monarch_mcp_server.tools.identity.get_monarch_client')
+    async def test_returns_members(self, mock_get_client):
+        users = [
+            {"id": "u1", "name": "Alex", "displayName": "Alex", "householdRole": "OWNER"},
+            {"id": "u2", "name": "Sam", "displayName": "Sam", "householdRole": "MEMBER"},
+        ]
+        client = AsyncMock()
+        client.get_household_members.return_value = {"myHousehold": {"users": users}}
+        mock_get_client.return_value = client
+
+        data = json.loads(await get_household_members())
+
+        assert data == {"myHousehold": {"users": users}}
+        client.get_household_members.assert_awaited_once_with()
+
+    @patch('monarch_mcp_server.tools.identity.get_monarch_client')
+    async def test_returns_empty_members(self, mock_get_client):
+        client = AsyncMock()
+        client.get_household_members.return_value = {"myHousehold": {"users": []}}
+        mock_get_client.return_value = client
+
+        data = json.loads(await get_household_members())
+
+        assert data == {"myHousehold": {"users": []}}
+        client.get_household_members.assert_awaited_once_with()
+
+    @patch('monarch_mcp_server.tools.identity.get_monarch_client')
+    async def test_error_handling(self, mock_get_client):
+        client = AsyncMock()
+        client.get_household_members.side_effect = Exception("Request failed")
+        mock_get_client.return_value = client
+
+        data = json.loads(await get_household_members())
+
+        assert data["error"] is True
+        assert data["tool"] == "get_household_members"
+        assert data["message"] == "Request failed"

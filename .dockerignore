@@ -1,0 +1,17 @@
+# Send only the files needed to build the application, excluding local credentials.
+*
+!Dockerfile
+!requirements-lock.txt
+!pyproject.toml
+!README.md
+!LICENSE
+!login_setup.py
+!src/
+!src/**
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/.env*
+**/*.pickle
+**/*.session
+**/.monarch-mcp-server

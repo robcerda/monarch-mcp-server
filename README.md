@@ -149,6 +149,36 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
 
 4. **Restart Claude Code**
 
+### Container image
+
+Publishing a GitHub release runs
+`.github/workflows/ci_build-push-container.yaml` and pushes a Linux AMD64 image
+to `ghcr.io/<owner>/<repository>`, using the repository where the workflow runs.
+The image is tagged with the release tag (for example, `v1.2.3`) and
+`sha-<short-commit>`. Stable releases also update `latest`; prereleases do not.
+The workflow uses the built-in `GITHUB_TOKEN` with `packages: write`, so no
+separate registry secret is needed.
+
+For a manual build, open **Actions → Build and Push Container → Run workflow**
+and select the branch to build. You can also select a tag with
+`gh workflow run ci_build-push-container.yaml --ref v1.2.3`.
+Manual builds publish the selected branch/tag and commit tags without updating
+`latest`. The workflow must be on the default branch for manual dispatch.
+
+Build locally with `docker build -t monarch-mcp-server .`, or pull a published
+image. The server uses stdio, so keep stdin open with `-i` when launching it
+from an MCP client. Authenticate once and reuse the same session volume:
+
+```bash
+docker run --rm -it \
+  -v monarch-session:/home/app/.monarch-mcp-server \
+  'ghcr.io/<owner>/<repository>:latest' python login_setup.py
+
+docker run --rm -i \
+  -v monarch-session:/home/app/.monarch-mcp-server \
+  'ghcr.io/<owner>/<repository>:latest'
+```
+
 ### 2. One-Time Authentication Setup
 
 **Important**: For security and MFA support, authentication is done outside of Claude.

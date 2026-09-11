@@ -151,6 +151,12 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
 
 ### Container image
 
+The Dockerfile uses Astral's
+[`uv` Python 3.12 slim image](https://docs.astral.sh/uv/guides/integration/docker/),
+with uv pinned to the version used in CI. It installs runtime dependencies from
+`uv.lock` using `uv sync --locked --no-dev` and runs the server from the built
+virtual environment as a non-root user.
+
 Publishing a GitHub release runs
 `.github/workflows/ci_build-push-container.yaml` and pushes a Linux AMD64 image
 to `ghcr.io/<owner>/<repository>`, using the repository where the workflow runs.

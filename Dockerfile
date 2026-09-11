@@ -1,17 +1,21 @@
-FROM python:3.12-slim-bookworm
+# Keep the uv version aligned with .github/workflows/ci.yml.
+FROM ghcr.io/astral-sh/uv:0.12.10-python3.12-trixie-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    UV_NO_CACHE=1 \
+    UV_PYTHON_DOWNLOADS=0 \
+    PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 
-# Use the same hash-verified runtime dependencies as the documented pip install.
-COPY requirements-lock.txt ./
-RUN pip install --no-cache-dir --require-hashes -r requirements-lock.txt
+# Install locked runtime dependencies separately so source changes reuse this layer.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project
 
-COPY pyproject.toml README.md LICENSE ./
+COPY README.md LICENSE ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir --no-deps .
+RUN uv sync --locked --no-dev --no-editable
 
 COPY login_setup.py ./
 

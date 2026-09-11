@@ -1,5 +1,6 @@
 name: Build and Push Container
 
+# Usage and tag policy: docs/container-publishing.md
 on:
   release:
     types: [published]

@@ -948,6 +948,38 @@ class TestUpdateTransaction:
             transaction_id="txn-1", amount=99.99, notes="Updated"
         )
 
+    @pytest.mark.parametrize("owner_user_id", ["user-1", ""])
+    async def test_passes_owner(self, mock_monarch_client, owner_user_id):
+        result = json.loads(
+            await update_transaction("txn-1", owner_user_id=owner_user_id)
+        )
+        assert result == {"updateTransaction": {"transaction": {"id": "txn-1"}}}
+        mock_monarch_client.update_transaction.assert_awaited_once_with(
+            transaction_id="txn-1", owner_user_id=owner_user_id
+        )
+
+    async def test_none_preserves_owner(self, mock_monarch_client):
+        await update_transaction("txn-1", category_id="cat-1", owner_user_id=None)
+        mock_monarch_client.update_transaction.assert_called_once_with(
+            transaction_id="txn-1", category_id="cat-1"
+        )
+
+    @pytest.mark.parametrize("owner_user_id", ["unknown-user", ""])
+    async def test_owner_rejection_is_not_success(
+        self, mock_monarch_client, owner_user_id
+    ):
+        mock_monarch_client.update_transaction.return_value = {
+            "updateTransaction": {
+                "transaction": None,
+                "errors": {"message": "Owner update rejected", "code": "INVALID"},
+            }
+        }
+        result = json.loads(
+            await update_transaction("txn-1", owner_user_id=owner_user_id)
+        )
+        assert result["success"] is False
+        assert "Owner update rejected" in json.dumps(result)
+
     async def test_passes_all_fields(self, mock_monarch_client):
         await update_transaction(
             "txn-1",
@@ -959,6 +991,7 @@ class TestUpdateTransaction:
             hide_from_reports=True,
             needs_review=False,
             notes="All fields",
+            owner_user_id="user-1",
         )
         mock_monarch_client.update_transaction.assert_called_once_with(
             transaction_id="txn-1",
@@ -970,6 +1003,7 @@ class TestUpdateTransaction:
             hide_from_reports=True,
             needs_review=False,
             notes="All fields",
+            owner_user_id="user-1",
         )
 
     async def test_handles_api_error(self, mock_monarch_client):

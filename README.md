@@ -297,7 +297,7 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 
 ## 🛠️ Available Tools
 
-All 58 registered tools. Required parameters are listed first, optional ones
+All 59 registered tools. Required parameters are listed first, optional ones
 are marked with a trailing question mark. This table is generated from the
 live tool registry and the functions' signatures, so it does not drift.
 
@@ -325,6 +325,7 @@ live tool registry and the functions' signatures, so it does not drift.
 | `get_debt_paydown` | Get the debt paydown plan and the accounts feeding it | `method`? |
 | `get_goal_contributions` | Show a goal's budgeted contributions, broken down by funding account | `goal_id`, `month`? |
 | `get_goals` | List Monarch savings and debt-paydown goals | None |
+| `get_household_members` | Get household member IDs, names, display names, and roles | None |
 | `get_merchant` | Get a merchant's details including recurring transaction stream configuration | `merchant_id` |
 | `get_net_worth` | Get net worth history over time | `start_date`?, `end_date`?, `account_type`? |
 | `get_net_worth_by_account_type` | Get net worth breakdown by account type over time | `start_date`, `timeframe`? |
@@ -357,10 +358,15 @@ live tool registry and the functions' signatures, so it does not drift.
 | `update_category` | Update an existing category's settings | `category_id`, `name`?, `icon`?, `group_id`?, `category_type`?, `exclude_from_budget`?, `budget_variability`?, `rollover_enabled`?, `rollover_start_month`?, `rollover_starting_balance`?, `rollover_frequency`?, `rollover_target_amount`?, `rollover_type`?, `confirm_rollover_reset`?, `dry_run`? |
 | `update_merchant` | Update a merchant's name and/or recurring transaction stream settings | `merchant_id`, `name`?, `is_recurring`?, `frequency`?, `base_date`?, `amount`?, `is_active`? |
 | `update_savings_goal` | Update a savings goal's target or monthly contribution | `goal_id`, `target_amount`?, `target_date`?, `name`?, `priority`?, `goal_type`?, `is_sinking_fund`? |
-| `update_transaction` | Update an existing transaction in Monarch Money | `transaction_id`, `category_id`?, `merchant_name`?, `goal_id`?, `amount`?, `date`?, `hide_from_reports`?, `needs_review`?, `notes`? |
+| `update_transaction` | Update an existing transaction in Monarch Money | `transaction_id`, `category_id`?, `merchant_name`?, `goal_id`?, `amount`?, `date`?, `hide_from_reports`?, `needs_review`?, `notes`?, `owner_user_id`? |
 | `update_transaction_notes` | Update the notes/memo for a transaction | `transaction_id`, `notes`, `receipt_url`? |
 | `update_transaction_rule` | Update an existing transaction rule | `rule_id`, `merchant_criteria_operator`?, `merchant_criteria_value`?, `merchant_criteria_values`?, `merchant_criteria`?, `original_statement_operator`?, `original_statement_values`?, `original_statement_criteria`?, `use_original_statement`?, `amount_operator`?, `amount_value`?, `amount_lower`?, `amount_upper`?, `amount_is_expense`?, `set_category_id`?, `set_merchant_name`?, `add_tag_ids`?, `link_goal_id`?, `hide_from_reports`?, `review_status`?, `account_ids`?, `category_ids`?, `clear_category`?, `clear_merchant`?, `clear_tags`?, `clear_goal_link`?, `clear_review_status`?, `apply_to_existing`? |
 | `upload_account_balance_history` | Upload corrected balance snapshots for an account | `account_id`, `corrections`, `dry_run`? |
+
+`get_household_members` returns members in `myHousehold.users`. Pass a member's
+`id` to `update_transaction(owner_user_id=...)` to assign ownership, or pass
+`owner_user_id=""` to set Shared ownership. Omitting the parameter or passing
+`null` leaves the existing owner unchanged. Pending invitations are not included.
 
 ## 📝 Usage Examples
 
@@ -563,7 +569,7 @@ tool that is not there.
 }
 ```
 
-This leaves 30 of the 58 tools available, covering everything that reads.
+This leaves 31 of the 59 tools available, covering everything that reads.
 Read only is off by default, so existing setups are unaffected. Note that it
 also removes the login and logout tools, since those change durable state, so
 authenticate with `login_setup.py` before enabling it.

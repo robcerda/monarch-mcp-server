@@ -20,6 +20,7 @@ from monarch_mcp_server.tools.auth import (  # noqa: F401
     monarch_logout,
 )
 from monarch_mcp_server.tools.identity import (  # noqa: F401
+    get_household_members,
     monarch_whoami,
 )
 from monarch_mcp_server.tools.accounts import (  # noqa: F401

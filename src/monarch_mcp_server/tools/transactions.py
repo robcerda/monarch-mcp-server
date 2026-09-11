@@ -682,6 +682,7 @@ async def update_transaction(
     hide_from_reports: Optional[bool] = None,
     needs_review: Optional[bool] = None,
     notes: Optional[str] = None,
+    owner_user_id: Optional[str] = None,
 ) -> str:
     """
     Update an existing transaction in Monarch Money.
@@ -696,6 +697,8 @@ async def update_transaction(
         hide_from_reports: Whether to hide this transaction from reports
         needs_review: Whether this transaction needs review
         notes: Notes for the transaction
+        owner_user_id: Member ID from get_household_members(), or "" for Shared.
+            Omitted or None leaves ownership unchanged.
     """
     try:
         client = await get_monarch_client()
@@ -718,6 +721,8 @@ async def update_transaction(
             update_data["needs_review"] = needs_review
         if notes is not None:
             update_data["notes"] = notes
+        if owner_user_id is not None:
+            update_data["owner_user_id"] = owner_user_id
 
         result = await client.update_transaction(**update_data)
         errors = payload_errors(result, "updateTransaction")

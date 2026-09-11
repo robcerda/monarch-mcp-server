@@ -1,10 +1,27 @@
 # Pinning every action to a commit SHA stops a retagged release walking in, but
 # it also means a pinned action never receives its own security fixes. This is
 # the other half of that strategy: Dependabot proposes the SHA bumps, and the
-# workflows above check what lands.
+# workflows check what lands.
 #
 # Version updates work from the manifests and do not need the dependency graph,
 # which is off for this repository.
+#
+# The uv ecosystem is deliberately NOT enabled. Dependabot's uv support
+# resolves the exported pin file separately from uv.lock, so every pull request
+# it opened carried two files disagreeing with each other: #135 and #138 both
+# pinned mcp 1.13.1 in uv.lock and 2.1.1 in the pin file, 37 packages apart, in
+# a single commit. Merging either would have made the pip install path install
+# different code than the uv path, which is the divergence the pin file exists
+# to prevent.
+#
+# Renaming the pin file did not help, because the compatibility shim at
+# requirements.txt includes it with -r and Dependabot follows that include.
+#
+# Python dependency bumps are therefore deliberate here. The weekly audit in
+# supply-chain.yml is the signal for when one is worth doing: it fails on any
+# advisory not already recorded in .github/audit-baseline.txt. To bump, run
+# uv lock --upgrade-package <name>, regenerate the pin file with the command in
+# its header, and let CI check the two agree.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -15,17 +32,4 @@ updates:
       prefix: ci
     groups:
       actions:
-        patterns: ["*"]
-
-  - package-ecosystem: uv
-    directory: /
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: deps
-    # Grouped so the standing advisory backlog clears in one reviewable pull
-    # request rather than a dozen, since nearly all of it is transitive under
-    # mcp and moves together.
-    groups:
-      python:
         patterns: ["*"]

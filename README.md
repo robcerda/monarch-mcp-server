@@ -149,6 +149,88 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
 
 4. **Restart Claude Code**
 
+### HTTP transport and Docker
+
+The server supports MCP Streamable HTTP at `/mcp`. Local launches still default
+to STDIO; select HTTP explicitly:
+
+```bash
+uv run --locked monarch-mcp-server --transport http --host 127.0.0.1 --port 8000
+```
+
+Connect an MCP client using Streamable HTTP to `http://127.0.0.1:8000/mcp`.
+This is an MCP endpoint, not a REST API or a browser page.
+
+The Docker image uses Astral's uv/Python 3.12 slim base, installs from `uv.lock`,
+and defaults to HTTP on `0.0.0.0:8000` inside the container. Build the image and
+authenticate using a persistent session volume:
+
+```bash
+docker build -t monarch-mcp-server .
+
+docker run --rm -it \
+  -v monarch-session:/home/app/.monarch-mcp-server \
+  monarch-mcp-server python login_setup.py
+
+docker run -d --name monarch-mcp --restart unless-stopped \
+  -p 127.0.0.1:8000:8000 \
+  -v monarch-session:/home/app/.monarch-mcp-server \
+  monarch-mcp-server
+```
+
+The login script supports a cookie file for browser-cookie authentication. To
+use it, also mount your cookie file at `/tmp/monarch-cookie.txt:ro` and set
+`MONARCH_MCP_COOKIE_FILE=/tmp/monarch-cookie.txt` for the login container. The
+file must be readable by the container's UID 10001. Once saved, the session
+volume is sufficient for normal server launches.
+
+To connect from another machine, put the container behind an authenticated
+HTTPS reverse proxy or a private network with access controls, publish the port
+on the appropriate interface, and allow the hostname used by the client:
+
+```bash
+docker run -d --name monarch-mcp --restart unless-stopped \
+  -p 127.0.0.1:8000:8000 \
+  -e MONARCH_MCP_ALLOWED_HOSTS=mcp.example.com \
+  -v monarch-session:/home/app/.monarch-mcp-server \
+  monarch-mcp-server
+```
+
+Here a reverse proxy on the Docker host forwards `https://mcp.example.com/mcp`
+to `http://127.0.0.1:8000/mcp`, preserving the public Host header. It must support
+streaming responses without buffering. For direct access on a private network,
+allow the client's Host value including the port, such as `server.lan:8000`.
+
+**This is a single-account server:** all connected clients share the same saved
+Monarch session and permissions, including enabled write tools. HTTP does not
+add client authentication or per-user account isolation. Host/origin checks
+protect against DNS rebinding; they do not authenticate callers. Use one server
+and session volume per Monarch account. Run one process/replica per endpoint:
+HTTP sessions are held in memory, and clients reconnect after a restart.
+
+| Setting | CLI flag | Environment variable | Default outside Docker |
+| --- | --- | --- | --- |
+| Transport | `--transport` | `MONARCH_MCP_TRANSPORT` | `stdio` (`http` aliases `streamable-http`) |
+| Listen address | `--host` | `MONARCH_MCP_HOST` | `127.0.0.1` |
+| Listen port | `--port` | `MONARCH_MCP_PORT` | `8000` |
+| Additional allowed Host headers | `--allowed-host` (repeatable) | `MONARCH_MCP_ALLOWED_HOSTS` (comma-separated) | None; loopback hosts are always allowed |
+| Additional allowed browser Origins | `--allowed-origin` (repeatable) | `MONARCH_MCP_ALLOWED_ORIGINS` (comma-separated) | None; HTTP loopback origins are always allowed |
+
+CLI flags override their environment settings. Host entries include the port
+when clients send one; `server.lan:*` allows any port. Origin entries include
+the scheme, for example `https://client.example.com`. Clients without an Origin
+header are supported. Browser clients may additionally require CORS handling
+at the reverse proxy.
+
+To run the Docker image over STDIO instead:
+
+```bash
+docker run --rm -i \
+  -e MONARCH_MCP_TRANSPORT=stdio \
+  -v monarch-session:/home/app/.monarch-mcp-server \
+  monarch-mcp-server
+```
+
 ### 2. One-Time Authentication Setup
 
 **Important**: For security and MFA support, authentication is done outside of Claude.

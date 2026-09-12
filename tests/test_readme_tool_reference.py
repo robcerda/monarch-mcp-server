@@ -16,7 +16,19 @@ from monarch_mcp_server import server as srv
 from monarch_mcp_server.app import mcp
 
 README = Path(__file__).resolve().parent.parent / "README.md"
-ROW = re.compile(r"^\| `(?P<name>\w+)` \| .* \| (?P<params>.*) \|$", re.M)
+ROW = re.compile(
+    r"^\|[ \t]*`(?P<name>\w+)`[ \t]*\|[^|\r\n]*\|(?P<params>[^|\r\n]*)\|[ \t]*$",
+    re.M,
+)
+
+
+@pytest.mark.parametrize("padding", ["", " ", "    "])
+def test_tool_rows_allow_column_alignment(padding):
+    row = f"|{padding}`get_accounts`{padding}|{padding}List accounts{padding}|{padding}None{padding}|"
+    match = ROW.fullmatch(row)
+    assert match is not None
+    assert match.group("name") == "get_accounts"
+    assert match.group("params").strip() == "None"
 
 
 def _documented():

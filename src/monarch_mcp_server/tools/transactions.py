@@ -5,9 +5,12 @@ import json
 import logging
 import re
 import unicodedata
+from calendar import monthrange
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
+
+from gql import gql
 
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
@@ -925,39 +928,131 @@ async def delete_transaction(transaction_id: str) -> str:
         return json_error("delete_transaction", e)
 
 
+GET_RECURRING_TRANSACTIONS_QUERY = gql(
+    """
+    query MCP_GetRecurringTransactionItems(
+      $startDate: Date!, $endDate: Date!, $includeLiabilities: Boolean,
+      $limit: Int, $offset: Int
+    ) {
+      recurringTransactionItems(
+        startDate: $startDate, endDate: $endDate,
+        includeLiabilities: $includeLiabilities, limit: $limit, offset: $offset
+      ) {
+        date
+        amount
+        isPast
+        transactionId
+        amountDiff
+        category { id name }
+        account { id displayName }
+        stream {
+          id
+          name
+          frequency
+          amount
+          isApproximate
+          merchant { id name logoUrl }
+          creditReportLiabilityAccount {
+            id
+            account { id displayName }
+            lastStatement {
+              id
+              dueDate
+              billAmount
+              minimumPaymentAmount
+              paymentStatus
+              remainingBalance
+            }
+          }
+        }
+      }
+    }
+    """
+)
+
+
 @mcp.tool()
 async def get_recurring_transactions(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    include_liabilities: bool = True,
+    limit: int = 100,
+    offset: int = 0,
+    include_metadata: bool = False,
 ) -> str:
     """
-    Get upcoming recurring transactions.
+    Get recurring merchant forecasts and synced liability bills.
 
-    Returns scheduled recurring transactions with their merchants, amounts, and accounts.
+    Includes synced credit-card and loan statements by default. Amounts remain
+    forecasts, not authoritative balances owed. The stream's latest statement
+    may have a different due date; its remaining_balance can be null or zero.
+    Merchant forecasts and liability bills may overlap and are not deduplicated.
 
     Args:
-        start_date: Start date in YYYY-MM-DD format (defaults to start of current month)
-        end_date: End date in YYYY-MM-DD format (defaults to end of current month)
+        start_date: YYYY-MM-DD; provide both dates or neither (current month start).
+        end_date: YYYY-MM-DD; defaults to current month end when both are omitted.
+        include_liabilities: Include synced liability bills (default True).
+            False requests merchant-only recurring items.
+        limit: Positive page size (default 100).
+        offset: Non-negative number of items to skip (default 0).
+        include_metadata: False keeps the legacy list. True returns an envelope
+            with data, count, args, total_count (null), and truncated. A full
+            page is conservatively marked truncated because no total is provided.
 
     Returns:
-        List of upcoming recurring transactions.
+        Recurring items with legacy merchant fields, account/category/merchant
+        IDs, and stream.credit_report_liability_account containing liability
+        identity and last_statement (id, due_date, bill_amount,
+        minimum_payment_amount, payment_status, remaining_balance).
+        For complete results, page with fixed dates and include_metadata=True
+        until truncated is false; advance offset by count each time.
     """
     try:
+        if (start_date is None) != (end_date is None):
+            raise ValueError("Specify both start_date and end_date, or omit both")
+        if start_date is not None and end_date is not None:
+            for value in (start_date, end_date):
+                try:
+                    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+                        raise ValueError
+                    datetime.strptime(value, "%Y-%m-%d")
+                except ValueError:
+                    raise ValueError("Dates must be valid YYYY-MM-DD values") from None
+            if start_date > end_date:
+                raise ValueError("start_date must be on or before end_date")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        if type(offset) is not int or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+
+        if start_date is None and end_date is None:
+            today = datetime.now()
+            start_date = today.replace(day=1).strftime("%Y-%m-%d")
+            end_date = today.replace(
+                day=monthrange(today.year, today.month)[1]
+            ).strftime("%Y-%m-%d")
+
         client = await get_monarch_client()
-
-        filters: Dict[str, Any] = {}
-        if start_date:
-            filters["start_date"] = start_date
-        if end_date:
-            filters["end_date"] = end_date
-
-        result = await client.get_recurring_transactions(**filters)
+        result = await client.gql_call(
+            operation="MCP_GetRecurringTransactionItems",
+            graphql_query=GET_RECURRING_TRANSACTIONS_QUERY,
+            variables={
+                "startDate": start_date,
+                "endDate": end_date,
+                "includeLiabilities": include_liabilities,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
 
         recurring_list = []
         for item in result.get("recurringTransactionItems", []):
-            recurring_info = {
+            recurring_info: Dict[str, Any] = {
                 "date": item.get("date"),
                 "amount": item.get("amount"),
+                "amount_diff": item.get("amountDiff"),
+                "account_id": (item.get("account") or {}).get("id"),
+                "category_id": (item.get("category") or {}).get("id"),
                 "is_past": item.get("isPast", False),
                 "transaction_id": item.get("transactionId"),
                 "stream": (
@@ -988,8 +1083,53 @@ async def get_recurring_transactions(
                     else None
                 ),
             }
+            stream = item.get("stream")
+            if stream:
+                liability = stream.get("creditReportLiabilityAccount")
+                liability_info = None
+                if liability is not None:
+                    account = liability.get("account") or {}
+                    statement = liability.get("lastStatement")
+                    liability_info = {
+                        "id": liability.get("id"),
+                        "account_id": account.get("id"),
+                        "account": account.get("displayName"),
+                        "last_statement": (
+                            {
+                                "id": statement.get("id"),
+                                "due_date": statement.get("dueDate"),
+                                "bill_amount": statement.get("billAmount"),
+                                "minimum_payment_amount": statement.get(
+                                    "minimumPaymentAmount"
+                                ),
+                                "payment_status": statement.get("paymentStatus"),
+                                "remaining_balance": statement.get("remainingBalance"),
+                            }
+                            if statement is not None
+                            else None
+                        ),
+                    }
+                recurring_info["stream"].update(
+                    name=stream.get("name"),
+                    merchant_id=(stream.get("merchant") or {}).get("id"),
+                    credit_report_liability_account=liability_info,
+                )
             recurring_list.append(recurring_info)
 
+        if include_metadata:
+            return json_success(
+                tool_response_envelope(
+                    "get_recurring_transactions",
+                    {
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "include_liabilities": include_liabilities,
+                        "limit": limit,
+                        "offset": offset,
+                    },
+                    recurring_list,
+                )
+            )
         return json_success(recurring_list)
     except Exception as e:
         return json_error("get_recurring_transactions", e)

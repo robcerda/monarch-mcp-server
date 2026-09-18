@@ -570,7 +570,7 @@ class TestGetRecurringTransactions:
     async def test_get_recurring_success(self, mock_get_client):
         """Test successful retrieval of recurring transactions."""
         mock_client = AsyncMock()
-        mock_client.get_recurring_transactions.return_value = {
+        mock_client.gql_call.return_value = {
             "recurringTransactionItems": [
                 {
                     "date": "2024-02-01",
@@ -603,16 +603,16 @@ class TestGetRecurringTransactions:
     async def test_get_recurring_with_dates(self, mock_get_client):
         """Test with custom date range."""
         mock_client = AsyncMock()
-        mock_client.get_recurring_transactions.return_value = {
+        mock_client.gql_call.return_value = {
             "recurringTransactionItems": []
         }
         mock_get_client.return_value = mock_client
 
         await get_recurring_transactions(start_date="2024-02-01", end_date="2024-02-29")
 
-        call_kwargs = mock_client.get_recurring_transactions.call_args.kwargs
-        assert call_kwargs["start_date"] == "2024-02-01"
-        assert call_kwargs["end_date"] == "2024-02-29"
+        variables = mock_client.gql_call.call_args.kwargs["variables"]
+        assert variables["startDate"] == "2024-02-01"
+        assert variables["endDate"] == "2024-02-29"
 
     @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
     async def test_get_recurring_error(self, mock_get_client):

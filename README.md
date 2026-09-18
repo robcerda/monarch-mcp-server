@@ -420,6 +420,51 @@ https://muse.ai/join
 - **Update Transaction Rule**: Modify existing rules
 - **Delete Transaction Rule**: Remove a rule
 
+### Recurring forecasts and synced bills
+
+`get_recurring_transactions()` includes merchant forecasts **and synced liability
+bills** (such as credit cards and loans). Set `include_liabilities=False` to
+request only merchant recurring items. Omit both dates for the current calendar
+month, or provide both `start_date` and `end_date` in `YYYY-MM-DD` format.
+
+The default response remains a JSON list with the existing merchant fields.
+Each item also exposes `account_id`, `category_id`, `amount_diff`, and the stream's
+`name` and `merchant_id`. A liability item can have a null merchant. Its
+`stream.credit_report_liability_account` contains the liability `id`, linked
+`account_id`/`account` name, and `last_statement` with `id`, `due_date`,
+`bill_amount`, `minimum_payment_amount`, `payment_status`, and `remaining_balance`.
+Missing statements and unknown balances stay null; paid balances stay zero.
+
+**These are not interchangeable amounts.** The item's `amount` and stream's
+`amount` are recurring forecasts. `last_statement.bill_amount` is the original
+synced statement amount; `remaining_balance` is the remaining synced statement
+balance. The latest statement's due date can differ from the forecast item's
+`date`. Payment status is returned as supplied by Monarch, not inferred. These
+values reflect the latest sync, not a guaranteed real-time amount owed.
+
+Merchant forecasts and liability bills can describe the same payment. The tool
+preserves both with their identities: it does not sum, deduplicate, or substitute
+forecast amounts for unknown statement balances.
+
+Reads are paginated (`limit=100`, `offset=0` by default). For completeness checks,
+use `include_metadata=True` to opt into the standard envelope (`data`, `args`,
+`count`, `total_count`, `truncated`, `tool`, `search`):
+
+```python
+get_recurring_transactions(
+    start_date="2026-02-01", end_date="2026-02-28",
+    include_liabilities=True, limit=100, offset=0, include_metadata=True,
+)
+```
+
+The API supplies no total, so `total_count` is null and a full page is
+conservatively marked `truncated=True` (more rows may exist). Keep the dates and
+filters fixed, advance `offset` by `count`, and continue until `truncated=False`.
+An exactly full final page requires one more request, which may return an empty
+page. The legacy list has no pagination metadata; do not assume one list is the
+complete month. Synced bills require bill sync to be available and configured
+in Monarch; the tool does not enable it or refresh institutions.
+
 ### 🔄 Merchant & Recurring Stream Management
 - **Get Merchant**: View a merchant's details including recurring transaction stream configuration
 - **Update Merchant**: Modify a merchant's name and/or recurring stream settings (frequency, amount, base date)
@@ -484,7 +529,7 @@ live tool registry and the functions' signatures, so it does not drift.
 | `get_merchant`                    | Get a merchant's details including recurring transaction stream configuration | `merchant_id`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `get_net_worth`                   | Get net worth history over time                                               | `start_date`?, `end_date`?, `account_type`?                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `get_net_worth_by_account_type`   | Get net worth breakdown by account type over time                             | `start_date`, `timeframe`?                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `get_recurring_transactions`      | Get upcoming recurring transactions                                           | `start_date`?, `end_date`?                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `get_recurring_transactions`      | Get upcoming recurring transactions                                           | `start_date`?, `end_date`?, `include_liabilities`?, `limit`?, `offset`?, `include_metadata`?                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `get_spending_summary`            | Get a spending summary broken down by category, category group, and merchant  | `start_date`?, `end_date`?                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `get_transaction_categories`      | Get all available transaction categories from Monarch Money                   | None                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `get_transaction_category_groups` | Get all transaction category groups (parent groupings for categories)         | None                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |

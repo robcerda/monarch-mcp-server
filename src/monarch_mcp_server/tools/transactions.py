@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
+from gql import gql
+
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
 from monarch_mcp_server.helpers import (
@@ -19,6 +21,7 @@ from monarch_mcp_server.helpers import (
     json_rejected,
     payload_errors,
     json_success,
+    require_nonblank,
     tool_response_envelope,
 )
 
@@ -647,6 +650,7 @@ async def create_transaction(
         update_balance: Whether to update the account balance (default: false)
     """
     try:
+        require_nonblank(merchant_name, "merchant_name")
         client = await get_monarch_client()
 
         transaction_data: Dict[str, Any] = {
@@ -705,6 +709,7 @@ async def update_transaction(
         if category_id is not None:
             update_data["category_id"] = category_id
         if merchant_name is not None:
+            require_nonblank(merchant_name, "merchant_name")
             update_data["merchant_name"] = merchant_name
         if goal_id is not None:
             update_data["goal_id"] = goal_id
@@ -815,6 +820,168 @@ async def mark_transaction_reviewed(transaction_id: str) -> str:
         return json_success(result)
     except Exception as e:
         return json_error("mark_transaction_reviewed", e)
+
+
+# Monarch's own bulk primitive, the one the web client calls when you select
+# transactions and edit them. `updates` takes the same TransactionUpdateParams
+# shape a single transaction update does, so one round trip covers a whole
+# selection whatever field is being set.
+BULK_UPDATE_TRANSACTIONS_MUTATION = gql("""
+mutation Common_BulkUpdateTransactionsMutation(
+  $selectedTransactionIds: [ID!]
+  $excludedTransactionIds: [ID!]
+  $allSelected: Boolean!
+  $expectedAffectedTransactionCount: Int!
+  $updates: TransactionUpdateParams!
+  $filters: TransactionFilterInput
+) {
+  bulkUpdateTransactions(
+    selectedTransactionIds: $selectedTransactionIds
+    excludedTransactionIds: $excludedTransactionIds
+    updates: $updates
+    allSelected: $allSelected
+    expectedAffectedTransactionCount: $expectedAffectedTransactionCount
+    filters: $filters
+  ) {
+    success
+    affectedCount
+    errors {
+      message
+    }
+  }
+}
+""")
+
+
+@mcp.tool()
+async def bulk_update_transactions(
+    transaction_ids: List[str],
+    category_id: Optional[str] = None,
+    merchant_name: Optional[str] = None,
+    notes: Optional[str] = None,
+    goal_id: Optional[str] = None,
+    needs_review: Optional[bool] = None,
+    dry_run: bool = False,
+) -> str:
+    """
+    Apply the same edit to many transactions in one request.
+
+    Uses Monarch's own bulk endpoint, the same one the web client calls when
+    you select transactions and edit them, so a set of any size costs one round
+    trip rather than one per transaction.
+
+    Reassigning `merchant_name` is how two merchant records are merged. Monarch
+    exposes no merge endpoint, and `update_merchant` cannot rename one merchant
+    onto another (it fails with "A merchant with this name already exists"), so
+    pointing every transaction at the canonical name is the only route. A name
+    that already exists attaches to that record; a new one creates it, so copy
+    the spelling exactly.
+
+    This endpoint is all or nothing. It reports `affectedCount` for the batch
+    rather than a result per transaction, so a partial failure is not something
+    it can express. `bulk_categorize_transactions` still fans out one request
+    per transaction and does report per item, which is the reason to reach for
+    it instead when that matters.
+
+    `amount` and `hide_from_reports` are not offered: the bulk endpoint rejects
+    both. `date` it would accept, but overwriting dates across a set is rarely
+    meant and cannot be undone without the original values.
+
+    Args:
+        transaction_ids: IDs of the transactions to update
+        category_id: Category to assign
+        merchant_name: Merchant name to assign
+        notes: Note to set on every transaction, replacing any existing note
+        goal_id: Goal to link
+        needs_review: True to flag them as needing review, False to clear it
+        dry_run: If True, report what would change without writing
+
+    Returns:
+        Success flag and affected count. When dry_run is True, the response
+        includes a "dry_run" flag and the planned update.
+    """
+    try:
+        if not transaction_ids:
+            return json_error(
+                "bulk_update_transactions",
+                ValueError("transaction_ids must not be empty"),
+            )
+        if merchant_name is not None:
+            require_nonblank(merchant_name, "merchant_name")
+
+        # These wire names are what TransactionUpdateParams actually accepts,
+        # confirmed against the live API by sending each one with an empty
+        # selection, where an unknown field fails validation before anything
+        # can be written. `merchant`, `hideFromReports`, `needsReview` and
+        # `amount` are all rejected: the merchant field is merchantName, the
+        # review flag is the reviewStatus enum, and hiding from reports has no
+        # bulk equivalent at all. Use update_transaction for that.
+        updates: Dict[str, Any] = {}
+        if category_id is not None:
+            updates["categoryId"] = category_id
+        if merchant_name is not None:
+            updates["merchantName"] = merchant_name
+        if notes is not None:
+            updates["notes"] = notes
+        if goal_id is not None:
+            updates["goalId"] = goal_id
+        if needs_review is not None:
+            updates["reviewStatus"] = "needs_review" if needs_review else "reviewed"
+        # Monarch accepts an update carrying nothing and changes nothing
+        # without erroring, so an empty edit would look like a success.
+        if not updates:
+            return json_error(
+                "bulk_update_transactions",
+                ValueError("pass at least one field to change"),
+            )
+
+        if dry_run:
+            return json_success(
+                {
+                    "dry_run": True,
+                    "total": len(transaction_ids),
+                    "transaction_ids": list(transaction_ids),
+                    "updates": updates,
+                }
+            )
+
+        client = await get_monarch_client()
+        result = await client.gql_call(
+            operation="Common_BulkUpdateTransactionsMutation",
+            graphql_query=BULK_UPDATE_TRANSACTIONS_MUTATION,
+            variables={
+                "selectedTransactionIds": list(transaction_ids),
+                "excludedTransactionIds": [],
+                # allSelected drives a filter based update server side. Always
+                # False: this updates exactly the ids it was handed, never
+                # everything matching the current filters.
+                "allSelected": False,
+                "expectedAffectedTransactionCount": len(transaction_ids),
+                "updates": updates,
+                "filters": None,
+            },
+        )
+
+        payload = result.get("bulkUpdateTransactions") or {}
+        # This endpoint can report success: false with a null errors object, so
+        # the flag is checked as well rather than inferring the write took from
+        # the absence of errors.
+        errors = payload_errors(result, "bulkUpdateTransactions")
+        if errors or not payload.get("success"):
+            return json_rejected(
+                "bulk_update_transactions",
+                errors or {"message": "bulk update reported failure"},
+            )
+        return json_success(
+            {
+                "success": True,
+                "requested": len(transaction_ids),
+                "affected": payload.get("affectedCount"),
+                "updates": updates,
+            }
+        )
+    except Exception as e:
+        return json_error("bulk_update_transactions", e)
 
 
 @mcp.tool()

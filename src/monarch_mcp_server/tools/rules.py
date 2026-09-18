@@ -12,6 +12,7 @@ from monarch_mcp_server.helpers import (
     json_rejected,
     json_success,
     payload_errors,
+    require_nonblank,
 )
 
 logger = logging.getLogger(__name__)
@@ -470,6 +471,9 @@ async def create_transaction_rule(
         )
     """
     try:
+        if set_merchant_name is not None:
+            require_nonblank(set_merchant_name, "set_merchant_name")
+
         client = await get_monarch_client()
 
         merchant = _build_criteria(
@@ -644,6 +648,9 @@ async def update_transaction_rule(
         JSON describing whether the update was applied.
     """
     try:
+        if set_merchant_name is not None:
+            require_nonblank(set_merchant_name, "set_merchant_name")
+
         client = await get_monarch_client()
 
         existing = await _fetch_rule(client, rule_id)

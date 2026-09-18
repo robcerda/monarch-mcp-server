@@ -951,3 +951,36 @@ class TestReorderReportsRejection:
         assert result["success"] is True
         assert result["moved_to"] == 2
         assert result["requested_order"] == 99
+
+
+class TestRulesRejectBlankMerchantName:
+    """A rule setting a whitespace merchant renames every match to junk.
+
+    `if set_merchant_name:` filtered "" but not "   ", so this was the one
+    merchant-name write path that looked guarded and was not.
+    """
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_create_refuses_a_blank_merchant_name(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(
+            await create_transaction_rule(
+                merchant_criteria_values=["amazon"],
+                set_merchant_name="   ",
+            )
+        )
+        assert data["error"] is True
+        mock_client.gql_call.assert_not_called()
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_update_refuses_a_blank_merchant_name(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(
+            await update_transaction_rule(rule_id="rule_1", set_merchant_name="   ")
+        )
+        assert data["error"] is True
+        mock_client.gql_call.assert_not_called()

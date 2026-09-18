@@ -363,3 +363,16 @@ class TestReviewRecurringStream:
         data = json.loads(result)
         assert data["error"] is True
         assert "Auth needed" in data["message"]
+
+
+class TestUpdateMerchantRejectsBlankName:
+    """A whitespace rename would corrupt the record every transaction points at."""
+
+    @patch("monarch_mcp_server.tools.merchants.get_monarch_client")
+    async def test_a_blank_name_is_refused(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await update_merchant(merchant_id="m_1", name="   "))
+        assert data["error"] is True
+        mock_client.gql_call.assert_not_called()

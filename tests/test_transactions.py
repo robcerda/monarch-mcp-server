@@ -13,6 +13,7 @@ from monarch_mcp_server.tools.transactions import (
     update_transaction_notes,
     mark_transaction_reviewed,
     bulk_categorize_transactions,
+    bulk_update_transactions,
     search_transactions,
     get_transaction_details,
     delete_transaction,
@@ -936,6 +937,18 @@ class TestCreateTransaction:
         )
         assert "create_transaction" in result
 
+    async def test_a_blank_merchant_name_is_refused(self, mock_monarch_client):
+        """Monarch would make a junk merchant out of a whitespace-only name."""
+        result = await create_transaction(
+            date="2026-03-15",
+            account_id="acc-1",
+            amount=-25.00,
+            merchant_name="   ",
+            category_id="cat-1",
+        )
+        assert json.loads(result)["error"] is True
+        mock_monarch_client.create_transaction.assert_not_called()
+
 
 class TestUpdateTransaction:
     async def test_updates_transaction(self):
@@ -976,6 +989,19 @@ class TestUpdateTransaction:
         mock_monarch_client.update_transaction.side_effect = Exception("Not found")
         result = await update_transaction("bad-id")
         assert "update_transaction" in result
+
+    async def test_a_blank_merchant_name_is_refused(self, mock_monarch_client):
+        """Renaming a merchant to whitespace would orphan the transaction."""
+        result = await update_transaction("txn-1", merchant_name="   ")
+        assert json.loads(result)["error"] is True
+        mock_monarch_client.update_transaction.assert_not_called()
+
+    async def test_an_omitted_merchant_name_is_still_allowed(self, mock_monarch_client):
+        """The guard must not turn 'leave the merchant alone' into an error."""
+        await update_transaction("txn-1", notes="No merchant here")
+        mock_monarch_client.update_transaction.assert_called_once_with(
+            transaction_id="txn-1", notes="No merchant here"
+        )
 
 
 class TestCategorizeTransaction:
@@ -1236,3 +1262,151 @@ class TestCreateTransactionReportsRejection:
         )
         assert result["success"] is False
         assert "Invalid account" in json.dumps(result)
+
+
+class TestBulkUpdateTransactions:
+    """Tests for bulk_update_transactions tool."""
+
+    @staticmethod
+    def _ok(affected):
+        return {
+            "bulkUpdateTransactions": {
+                "success": True,
+                "affectedCount": affected,
+                "errors": None,
+            }
+        }
+
+    async def test_one_request_covers_the_whole_set(self, mock_monarch_client):
+        """The point of the endpoint: not one call per transaction."""
+        mock_monarch_client.gql_call.return_value = self._ok(3)
+
+        data = json.loads(
+            await bulk_update_transactions(
+                transaction_ids=["txn_1", "txn_2", "txn_3"],
+                merchant_name="Walmart",
+            )
+        )
+        assert mock_monarch_client.gql_call.call_count == 1
+        mock_monarch_client.update_transaction.assert_not_called()
+        assert data["success"] is True
+        assert data["requested"] == 3
+        assert data["affected"] == 3
+
+    async def test_arguments_map_to_the_wire_names(self, mock_monarch_client):
+        """merchantName and categoryId are what the API accepts, not our names."""
+        mock_monarch_client.gql_call.return_value = self._ok(1)
+
+        await bulk_update_transactions(
+            transaction_ids=["txn_1"],
+            merchant_name="Walmart",
+            category_id="cat_1",
+            notes="tidied",
+        )
+        updates = mock_monarch_client.gql_call.call_args.kwargs["variables"]["updates"]
+        assert updates == {
+            "categoryId": "cat_1",
+            "merchantName": "Walmart",
+            "notes": "tidied",
+        }
+
+    async def test_needs_review_becomes_the_review_status_enum(
+        self, mock_monarch_client
+    ):
+        """There is no needsReview field; the API takes a lowercase enum."""
+        mock_monarch_client.gql_call.return_value = self._ok(1)
+
+        await bulk_update_transactions(transaction_ids=["txn_1"], needs_review=False)
+        updates = mock_monarch_client.gql_call.call_args.kwargs["variables"]["updates"]
+        assert updates == {"reviewStatus": "reviewed"}
+
+        await bulk_update_transactions(transaction_ids=["txn_1"], needs_review=True)
+        updates = mock_monarch_client.gql_call.call_args.kwargs["variables"]["updates"]
+        assert updates == {"reviewStatus": "needs_review"}
+
+    async def test_all_selected_is_never_true(self, mock_monarch_client):
+        """True updates everything matching filters, not the listed ids."""
+        mock_monarch_client.gql_call.return_value = self._ok(2)
+
+        await bulk_update_transactions(
+            transaction_ids=["txn_1", "txn_2"], merchant_name="Walmart"
+        )
+        variables = mock_monarch_client.gql_call.call_args.kwargs["variables"]
+        assert variables["allSelected"] is False
+        assert variables["filters"] is None
+        assert variables["expectedAffectedTransactionCount"] == 2
+        assert variables["selectedTransactionIds"] == ["txn_1", "txn_2"]
+
+    async def test_a_false_success_is_a_failure_even_without_errors(
+        self, mock_monarch_client
+    ):
+        """This endpoint can report success: false with a null errors object."""
+        mock_monarch_client.gql_call.return_value = {
+            "bulkUpdateTransactions": {
+                "success": False,
+                "affectedCount": 0,
+                "errors": None,
+            }
+        }
+
+        data = json.loads(
+            await bulk_update_transactions(
+                transaction_ids=["txn_1"], merchant_name="Walmart"
+            )
+        )
+        assert data["success"] is False
+
+    async def test_a_rejection_is_reported_even_when_success_is_true(
+        self, mock_monarch_client
+    ):
+        """An errors object outweighs the flag; payload_errors normalises it."""
+        mock_monarch_client.gql_call.return_value = {
+            "bulkUpdateTransactions": {
+                "success": True,
+                "affectedCount": 0,
+                "errors": {"message": "Invalid category"},
+            }
+        }
+
+        data = json.loads(
+            await bulk_update_transactions(
+                transaction_ids=["txn_1"], category_id="nope"
+            )
+        )
+        assert data["success"] is False
+        assert "Invalid category" in json.dumps(data)
+
+    async def test_an_empty_update_is_refused(self, mock_monarch_client):
+        """Monarch accepts a no-op silently, which would look like success."""
+        data = json.loads(await bulk_update_transactions(transaction_ids=["txn_1"]))
+        assert data["error"] is True
+        mock_monarch_client.gql_call.assert_not_called()
+
+    async def test_an_empty_selection_is_refused(self, mock_monarch_client):
+        data = json.loads(
+            await bulk_update_transactions(transaction_ids=[], merchant_name="Walmart")
+        )
+        assert data["error"] is True
+        mock_monarch_client.gql_call.assert_not_called()
+
+    async def test_a_blank_merchant_name_is_refused(self, mock_monarch_client):
+        data = json.loads(
+            await bulk_update_transactions(
+                transaction_ids=["txn_1"], merchant_name="   "
+            )
+        )
+        assert data["error"] is True
+        mock_monarch_client.gql_call.assert_not_called()
+
+    async def test_dry_run_writes_nothing(self, mock_monarch_client):
+        data = json.loads(
+            await bulk_update_transactions(
+                transaction_ids=["txn_1", "txn_2"],
+                merchant_name="Walmart",
+                dry_run=True,
+            )
+        )
+        assert data["dry_run"] is True
+        assert data["total"] == 2
+        assert data["updates"] == {"merchantName": "Walmart"}
+        mock_monarch_client.gql_call.assert_not_called()

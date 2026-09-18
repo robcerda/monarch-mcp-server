@@ -7,7 +7,7 @@ from gql import gql
 
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
-from monarch_mcp_server.helpers import json_error, json_success
+from monarch_mcp_server.helpers import json_error, json_success, require_nonblank
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +236,7 @@ async def update_merchant(
         merchant_input: Dict[str, Any] = {"merchantId": merchant_id}
 
         if name is not None:
+            require_nonblank(name, "name")
             merchant_input["name"] = name
 
         if recurrence_fields:

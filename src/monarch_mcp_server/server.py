@@ -40,6 +40,7 @@ from monarch_mcp_server.tools.transactions import (  # noqa: F401
     update_transaction_notes,
     mark_transaction_reviewed,
     bulk_categorize_transactions,
+    bulk_update_transactions,
     delete_transaction,
     get_recurring_transactions,
     get_transactions_needing_review,

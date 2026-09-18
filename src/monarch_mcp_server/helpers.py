@@ -23,6 +23,21 @@ def format_exception(exc: Exception) -> str:
     return type(exc).__name__
 
 
+def require_nonblank(value: str, field: str) -> None:
+    """Refuse a blank name before it reaches Monarch.
+
+    Monarch makes a merchant out of whatever string it is handed, so a blank
+    or whitespace-only name quietly creates a junk merchant record instead of
+    failing. Lives here rather than in one tool because the hole belongs to
+    the field, not the caller: transactions, merchants and rules all write
+    merchant names. Raised, not returned, since every one of those funnels
+    exceptions through json_error and a shared validator should not have to
+    know which tool called it.
+    """
+    if not value.strip():
+        raise ValueError(f"{field} must not be blank")
+
+
 def first_present(*values: Any) -> Any:
     """Return the first value that is not None and not an empty string."""
     for value in values:

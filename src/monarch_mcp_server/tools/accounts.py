@@ -36,10 +36,18 @@ def _sync_status(account: dict) -> dict:
     already returns the credential metadata that reveals this, so surface it
     in the listing rather than requiring a second call. For a per-connection
     view with staleness thresholds, see ``get_account_sync_health``.
+
+    ``connection_status`` is the raw institution status the provider reports
+    (e.g. ``RELINK``/``DEGRADED``/``HEALTHY``); the other keys are derived flags.
     """
     credential = account.get("credential") or {}
     needs_reauth = bool(credential.get("updateRequired"))
     disconnected_at = credential.get("disconnectedFromDataProviderAt")
+    # Raw institution connection status (e.g. "RELINK", "DEGRADED", "HEALTHY").
+    # The GetAccounts query already returns credential.institution.status; it is
+    # the provider-reported reason behind a broken link, so surface it alongside
+    # the derived flags rather than only inferring state from updateRequired.
+    connection_status = (credential.get("institution") or {}).get("status")
     sync_disabled = bool(account.get("syncDisabled"))
     if account.get("isManual"):
         state = "manual"
@@ -54,6 +62,7 @@ def _sync_status(account: dict) -> dict:
     return {
         "state": state,
         "needs_reauth": needs_reauth,
+        "connection_status": connection_status,
         "disconnected_at": disconnected_at,
         "sync_disabled": sync_disabled,
         "data_provider": credential.get("dataProvider") or account.get("dataProvider"),

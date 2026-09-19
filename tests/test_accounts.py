@@ -75,7 +75,11 @@ class TestGetAccounts:
                     "id": "acc-reauth",
                     "displayName": "Needs Login",
                     "displayLastUpdatedAt": "2026-02-08T04:00:00+00:00",
-                    "credential": {"updateRequired": True, "dataProvider": "PLAID"},
+                    "credential": {
+                        "updateRequired": True,
+                        "dataProvider": "PLAID",
+                        "institution": {"status": "RELINK"},
+                    },
                 },
                 {
                     "id": "acc-disc",
@@ -105,6 +109,7 @@ class TestGetAccounts:
         assert result["acc-reauth"]["sync"]["state"] == "needs_reauth"
         assert result["acc-reauth"]["sync"]["needs_reauth"] is True
         assert result["acc-reauth"]["sync"]["data_provider"] == "PLAID"
+        assert result["acc-reauth"]["sync"]["connection_status"] == "RELINK"
         assert result["acc-reauth"]["last_updated_at"] == "2026-02-08T04:00:00+00:00"
 
         assert result["acc-disc"]["sync"]["state"] == "disconnected"
@@ -114,6 +119,7 @@ class TestGetAccounts:
         assert result["acc-paused"]["sync"]["sync_disabled"] is True
 
         assert result["acc-manual"]["sync"]["state"] == "manual"
+        assert result["acc-manual"]["sync"]["connection_status"] is None
         assert result["acc-manual"]["is_manual"] is True
 
     async def test_handles_empty_accounts(self, mock_monarch_client):

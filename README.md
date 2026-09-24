@@ -446,9 +446,10 @@ Merchant forecasts and liability bills can describe the same payment. The tool
 preserves both with their identities: it does not sum, deduplicate, or substitute
 forecast amounts for unknown statement balances.
 
-Reads are paginated (`limit=100`, `offset=0` by default). For completeness checks,
-use `include_metadata=True` to opt into the standard envelope (`data`, `args`,
-`count`, `total_count`, `truncated`, `tool`, `search`):
+With `limit` omitted, the tool reads every page itself and returns the complete
+range, so the default list is the whole month. Pass `limit` to read a single page
+instead, and use `include_metadata=True` to opt into the standard envelope
+(`data`, `args`, `count`, `total_count`, `truncated`, `tool`, `search`):
 
 ```python
 get_recurring_transactions(
@@ -457,13 +458,14 @@ get_recurring_transactions(
 )
 ```
 
-The API supplies no total, so `total_count` is null and a full page is
-conservatively marked `truncated=True` (more rows may exist). Keep the dates and
-filters fixed, advance `offset` by `count`, and continue until `truncated=False`.
-An exactly full final page requires one more request, which may return an empty
-page. The legacy list has no pagination metadata; do not assume one list is the
-complete month. Synced bills require bill sync to be available and configured
-in Monarch; the tool does not enable it or refresh institutions.
+The API supplies no total, so `total_count` is null. With an explicit `limit`, a
+full page is conservatively marked `truncated=True` (more rows may exist). Keep
+the dates and filters fixed, advance `offset` by `count`, and continue until
+`truncated=False`. An exactly full final page requires one more request, which
+may return an empty page.
+
+Synced bills require bill sync to be available and configured in Monarch; the
+tool does not enable it or refresh institutions.
 
 ### 🔄 Merchant & Recurring Stream Management
 - **Get Merchant**: View a merchant's details including recurring transaction stream configuration

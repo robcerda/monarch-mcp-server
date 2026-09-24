@@ -862,6 +862,7 @@ async def bulk_update_transactions(
     notes: Optional[str] = None,
     goal_id: Optional[str] = None,
     needs_review: Optional[bool] = None,
+    business_entity_id: Optional[str] = None,
     dry_run: bool = False,
 ) -> str:
     """
@@ -895,6 +896,8 @@ async def bulk_update_transactions(
         notes: Note to set on every transaction, replacing any existing note
         goal_id: Goal to link
         needs_review: True to flag them as needing review, False to clear it
+        business_entity_id: Business to assign (from get_business_entities),
+            or "none" to clear it. Requires Monarch's business feature.
         dry_run: If True, report what would change without writing
 
     Returns:
@@ -928,6 +931,11 @@ async def bulk_update_transactions(
             updates["goalId"] = goal_id
         if needs_review is not None:
             updates["reviewStatus"] = "needs_review" if needs_review else "reviewed"
+        if business_entity_id is not None:
+            # businessEntityId confirmed against the live API (2026-09-24).
+            updates["businessEntityId"] = (
+                None if business_entity_id.strip().lower() == "none" else business_entity_id
+            )
         # Monarch accepts an update carrying nothing and changes nothing
         # without erroring, so an empty edit would look like a success.
         if not updates:

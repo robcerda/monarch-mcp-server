@@ -230,7 +230,9 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 ## Containerized Deployment
 
 The Docker image uses Astral's uv/Python 3.12 slim base, installs from `uv.lock`,
-and defaults to HTTP on `0.0.0.0:8000` inside the container.
+and defaults to HTTP on `0.0.0.0:8000` inside the container. Because that is
+not a loopback address, the server refuses to start unless
+`MONARCH_MCP_HTTP_TOKEN` is set (see [HTTP authentication](#http-authentication)).
 
 ### Build the image
 
@@ -285,16 +287,21 @@ Once saved, the session volume is sufficient for normal server launches.
 
 ### Start the HTTP server
 
-Reuse the session volume when starting the server:
+Reuse the session volume when starting the server, and pass a bearer token:
 
 ```bash
+$ export MONARCH_MCP_HTTP_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 $ docker run -d --name monarch-mcp --restart unless-stopped \
   -p 127.0.0.1:8000:8000 \
+  -e MONARCH_MCP_HTTP_TOKEN \
   -v monarch-session:/home/app/.monarch-mcp-server \
   monarch-mcp-server
 ```
 
-Connect your MCP client to `http://127.0.0.1:8000/mcp` using Streamable HTTP.
+Connect your MCP client to `http://127.0.0.1:8000/mcp` using Streamable HTTP,
+sending `Authorization: Bearer <token>` (see [HTTP authentication](#http-authentication)).
+Keep `-p 127.0.0.1:8000:8000`: a bare `-p 8000:8000` publishes the port on
+every interface, and Docker bypasses host firewalls for published ports.
 See [HTTP transport configuration](#http-transport-configuration) for all settings.
 
 ### Connect from another machine
@@ -308,6 +315,7 @@ To connect from another machine, **put the container behind an authenticated HTT
 ```bash
 docker run -d --name monarch-mcp --restart unless-stopped \
   -p 127.0.0.1:8000:8000 \
+  -e MONARCH_MCP_HTTP_TOKEN \
   -e MONARCH_MCP_ALLOWED_HOSTS=mcp.example.com \
   -v monarch-session:/home/app/.monarch-mcp-server \
   monarch-mcp-server
@@ -321,6 +329,7 @@ For direct access on a private network, allow the client's Host value including 
 Let me stress this point: **This is a single-account server!**
 All connected clients share the *same* saved Monarch session and permissions, including enabled write tools.
 Basic Host/origin checks protect against DNS rebinding; they do not authenticate callers.
+The bearer token does, but anyone holding it gets every enabled tool.
 Use one server and session volume per Monarch account if you need to.
 
 ### Use STDIO instead
@@ -351,12 +360,43 @@ Connect an MCP client using Streamable HTTP to `http://127.0.0.1:8000/mcp`.
 | Listen port                        | `--port`                        | `MONARCH_MCP_PORT`                              | `8000`                                         |
 | Additional allowed Host headers    | `--allowed-host` (repeatable)   | `MONARCH_MCP_ALLOWED_HOSTS` (comma-separated)   | None; loopback hosts are always allowed        |
 | Additional allowed browser Origins | `--allowed-origin` (repeatable) | `MONARCH_MCP_ALLOWED_ORIGINS` (comma-separated) | None; HTTP loopback origins are always allowed |
+| Bearer token for every request     | None (environment only)         | `MONARCH_MCP_HTTP_TOKEN`                        | Unset; required on non-loopback hosts          |
 
 CLI flags override their environment settings.
 Host entries include the port when clients send one; `server.lan:*` allows any port.
 Origin entries include the scheme, for example `https://client.example.com`.
 Clients without an Origin header are supported.
 Browser clients may additionally require CORS handling at the reverse proxy.
+
+### HTTP authentication
+
+When `MONARCH_MCP_HTTP_TOKEN` is set, every HTTP request must carry
+`Authorization: Bearer <token>`; anything else gets `401 Unauthorized`.
+If the listen address is not loopback (`127.0.0.1`, `localhost`, `::1`) and
+the token is unset, the server refuses to start. STDIO is unaffected.
+The token is read from the environment only, so it does not appear in process
+listings. Generate a long random value, for example:
+
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+Configure the client to send it, for example:
+
+```json
+{
+  "mcpServers": {
+    "monarch-money": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": { "Authorization": "Bearer <token>" }
+    }
+  }
+}
+```
+
+The token travels in cleartext over plain HTTP, so use HTTPS (for example the
+reverse proxy above) for anything beyond loopback.
 
 ## ✨ Features
 

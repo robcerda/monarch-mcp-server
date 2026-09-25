@@ -1,8 +1,14 @@
 """FastMCP application instance and entry point."""
 
 import argparse
+import hmac
 import logging
 import os
+
+from starlette.applications import Starlette
+from starlette.datastructures import Headers
+from starlette.responses import PlainTextResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 try:  # mcp >= 2.0 renamed FastMCP to MCPServer
     from mcp.server.mcpserver import MCPServer as FastMCP
@@ -51,6 +57,42 @@ def _env_list(name: str) -> list[str]:
     ]
 
 
+TOKEN_ENV = "MONARCH_MCP_HTTP_TOKEN"
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+class _RequireBearerToken:
+    """Reject every HTTP request lacking ``Authorization: Bearer <token>``.
+
+    Host/Origin checks only stop DNS rebinding; they are client-supplied
+    headers, so this is the actual authentication for the HTTP transport.
+
+    CORS preflight (``OPTIONS``) requests are exempt: browsers never attach
+    credentials to them, so authenticating them just breaks preflight for
+    browser-based clients. The actual RPC methods stay protected.
+    """
+
+    def __init__(self, app: ASGIApp, token: str) -> None:
+        self.app = app
+        self.expected = token.encode()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope.get("method") != "OPTIONS":
+            auth = Headers(scope=scope).get("authorization", "")
+            scheme, _, param = auth.partition(" ")
+            if scheme.lower() != "bearer" or not hmac.compare_digest(
+                param.strip().encode(), self.expected
+            ):
+                response = PlainTextResponse(
+                    "Unauthorized",
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Main entry point for the server."""
     parser = argparse.ArgumentParser(description="Monarch Money MCP Server")
@@ -91,6 +133,7 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("MONARCH_MCP_TRANSPORT must be stdio, streamable-http, or http")
     if not args.host.strip():
         parser.error("HTTP host must not be empty")
+    normalized_host = args.host.strip().strip("[]")
 
     if args.transport != "stdio":
         from mcp.server.transport_security import TransportSecuritySettings
@@ -127,6 +170,24 @@ def main(argv: list[str] | None = None) -> None:
                 ),
             ],
         )
+
+        token = os.environ.get(TOKEN_ENV, "").strip()
+        if not token and normalized_host.lower() not in _LOOPBACK_HOSTS:
+            parser.error(
+                f"{TOKEN_ENV} must be set when serving HTTP on a non-loopback "
+                f"address ({args.host}); clients then send "
+                f"'Authorization: Bearer <token>'"
+            )
+        if token:
+            # mcp.run() builds the app via streamable_http_app(), so wrapping it
+            # covers both uvicorn and tests. Wrap the class method, not the
+            # current attribute, so repeated main() calls do not stack.
+            def streamable_http_app() -> Starlette:
+                starlette_app: Starlette = type(mcp).streamable_http_app(mcp)
+                starlette_app.add_middleware(_RequireBearerToken, token=token)
+                return starlette_app
+
+            mcp.streamable_http_app = streamable_http_app
 
     logger.info("Starting Monarch Money MCP Server (%s)...", args.transport)
     try:

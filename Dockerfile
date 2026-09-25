@@ -1,6 +1,8 @@
 # Keep the uv version aligned with .github/workflows/ci.yml.
 FROM ghcr.io/astral-sh/uv:0.12.10-python3.12-trixie-slim
 
+# 0.0.0.0 is non-loopback, so the server refuses to start over HTTP unless
+# MONARCH_MCP_HTTP_TOKEN is passed at run time (never bake it into the image).
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_NO_CACHE=1 \

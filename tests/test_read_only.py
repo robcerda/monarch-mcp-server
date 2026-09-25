@@ -95,6 +95,21 @@ class TestMutatingToolList:
             unknown = read_only.MUTATING_TOOLS - registered
             assert not unknown, f"MUTATING_TOOLS names no such tools: {sorted(unknown)}"
 
+    async def test_every_tool_carries_matching_annotations(self):
+        """Clients key auto-approval on these hints, so they must track the set."""
+        from monarch_mcp_server.app import mcp
+
+        tools = await mcp.list_tools()
+        assert tools
+        for tool in tools:
+            hints = tool.annotations
+            assert hints is not None, f"{tool.name} has no annotations"
+            if tool.name in read_only.MUTATING_TOOLS:
+                assert hints.readOnlyHint is False, tool.name
+                assert hints.destructiveHint is True, tool.name
+            else:
+                assert hints.readOnlyHint is True, tool.name
+
     async def test_it_matches_the_readme_approval_list(self):
         """The two lists answer the same question and must not diverge."""
         from pathlib import Path
@@ -243,3 +258,29 @@ class TestPositionalToolName:
 
         fake.tool("delete_transaction")(some_helper)
         assert registered == []
+
+
+class TestBareDecorator:
+    @pytest.mark.parametrize("value", ["", "1"])
+    def test_bare_mcp_tool_registers_read_tools(self, monkeypatch, value):
+        """@mcp.tool without parentheses must not pass fn as the tool name."""
+        try:
+            from mcp.server.mcpserver import MCPServer as FastMCP
+        except ImportError:
+            from mcp.server.fastmcp import FastMCP
+
+        monkeypatch.setenv(read_only.ENV_VAR, value)
+        mcp = FastMCP("test")
+        read_only.install(mcp)
+
+        @mcp.tool
+        def get_things():
+            return "ok"
+
+        @mcp.tool
+        def delete_transaction():
+            return "gone"
+
+        names = {t.name for t in asyncio.run(mcp.list_tools())}
+        assert "get_things" in names
+        assert ("delete_transaction" in names) is (value == "")

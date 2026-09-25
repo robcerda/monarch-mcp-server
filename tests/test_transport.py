@@ -11,9 +11,18 @@ from monarch_mcp_server import app
 
 @pytest.fixture(autouse=True)
 def isolate_transport(monkeypatch):
-    for suffix in ("TRANSPORT", "HOST", "PORT", "ALLOWED_HOSTS", "ALLOWED_ORIGINS"):
+    for suffix in (
+        "TRANSPORT",
+        "HOST",
+        "PORT",
+        "ALLOWED_HOSTS",
+        "ALLOWED_ORIGINS",
+        "HTTP_TOKEN",
+    ):
         monkeypatch.delenv(f"MONARCH_MCP_{suffix}", raising=False)
     monkeypatch.setattr(app.mcp, "settings", app.mcp.settings.model_copy(deep=True))
+    # main() installs the bearer-token wrapper on the instance; undo it per test.
+    monkeypatch.setattr(app.mcp, "streamable_http_app", app.mcp.streamable_http_app)
     monkeypatch.setattr(app.mcp, "_session_manager", None)
     run = Mock()
     monkeypatch.setattr(app.mcp, "run", run)
@@ -27,6 +36,7 @@ def test_default_remains_stdio(isolate_transport):
 
 def test_environment_configures_http(monkeypatch, isolate_transport):
     monkeypatch.setenv("MONARCH_MCP_TRANSPORT", "streamable-http")
+    monkeypatch.setenv("MONARCH_MCP_HTTP_TOKEN", TOKEN)
     monkeypatch.setenv("MONARCH_MCP_HOST", "0.0.0.0")
     monkeypatch.setenv("MONARCH_MCP_PORT", "9000")
     monkeypatch.setenv(
@@ -48,6 +58,7 @@ def test_cli_overrides_environment(monkeypatch, isolate_transport):
     monkeypatch.setenv("MONARCH_MCP_PORT", "invalid")
     monkeypatch.setenv("MONARCH_MCP_ALLOWED_HOSTS", "old.example.com")
     monkeypatch.setenv("MONARCH_MCP_ALLOWED_ORIGINS", "https://old.example.com")
+    monkeypatch.setenv("MONARCH_MCP_HTTP_TOKEN", TOKEN)
     app.main(
         [
             "--transport",
@@ -97,6 +108,8 @@ def test_invalid_environment_transport_fails(monkeypatch, isolate_transport):
     isolate_transport.assert_not_called()
 
 
+TOKEN = "test-token"
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
 HEADERS = {"Accept": "application/json, text/event-stream"}
 INITIALIZE = {
     "jsonrpc": "2.0",
@@ -119,14 +132,19 @@ def rpc_result(response):
     return json.loads(data)["result"]
 
 
-def test_http_initialize_list_and_call_tool(mock_monarch_client):
+def test_http_initialize_list_and_call_tool(monkeypatch, mock_monarch_client):
+    monkeypatch.setenv("MONARCH_MCP_HTTP_TOKEN", TOKEN)
     app.main(["--transport", "http", "--host", "0.0.0.0"])
     with TestClient(
         app.mcp.streamable_http_app(), base_url="http://localhost:8000"
     ) as client:
-        response = client.post("/mcp", headers=HEADERS, json=INITIALIZE)
+        response = client.post("/mcp", headers={**HEADERS, **AUTH}, json=INITIALIZE)
         assert rpc_result(response)["serverInfo"]["name"] == "Monarch Money MCP Server"
-        headers = {**HEADERS, "Mcp-Session-Id": response.headers["mcp-session-id"]}
+        headers = {
+            **HEADERS,
+            **AUTH,
+            "Mcp-Session-Id": response.headers["mcp-session-id"],
+        }
         initialized = client.post(
             "/mcp",
             headers=headers,
@@ -174,12 +192,15 @@ def test_http_initialize_list_and_call_tool(mock_monarch_client):
         ({"Host": "localhost"}, 200),
     ],
 )
-def test_http_validates_host_and_origin(headers, status):
+def test_http_validates_host_and_origin(monkeypatch, headers, status):
+    monkeypatch.setenv("MONARCH_MCP_HTTP_TOKEN", TOKEN)
     app.main(["--transport", "http", "--host", "0.0.0.0"])
     with TestClient(
         app.mcp.streamable_http_app(), base_url="http://localhost:8000"
     ) as client:
-        response = client.post("/mcp", headers={**HEADERS, **headers}, json=INITIALIZE)
+        response = client.post(
+            "/mcp", headers={**HEADERS, **AUTH, **headers}, json=INITIALIZE
+        )
         assert response.status_code == status
 
 
@@ -206,3 +227,103 @@ def test_http_allows_configured_remote_host_and_origin():
             },
         )
         assert "serverInfo" in rpc_result(response)
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.10", "::"])
+def test_non_loopback_http_without_token_refuses_to_start(host, isolate_transport):
+    with pytest.raises(SystemExit) as exc:
+        app.main(["--transport", "http", "--host", host])
+    assert exc.value.code == 2
+    isolate_transport.assert_not_called()
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "[::1]"])
+def test_loopback_http_without_token_is_allowed(host, isolate_transport):
+    app.main(["--transport", "http", "--host", host])
+    isolate_transport.assert_called_once_with(transport="streamable-http")
+    with TestClient(
+        app.mcp.streamable_http_app(), base_url="http://localhost:8000"
+    ) as client:
+        assert "serverInfo" in rpc_result(
+            client.post("/mcp", headers=HEADERS, json=INITIALIZE)
+        )
+
+
+def test_stdio_ignores_missing_token(isolate_transport):
+    app.main(["--transport", "stdio", "--host", "0.0.0.0"])
+    isolate_transport.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        {},
+        {"Authorization": "Bearer wrong-token"},
+        {"Authorization": TOKEN},
+        {"Authorization": f"Basic {TOKEN}"},
+        {"Authorization": f"Bearer {TOKEN}x"},
+        {"Authorization": "bearer wrong-token"},
+    ],
+)
+@pytest.mark.parametrize("host", ["0.0.0.0", "127.0.0.1"])
+def test_http_rejects_missing_or_wrong_token(monkeypatch, host, auth):
+    monkeypatch.setenv("MONARCH_MCP_HTTP_TOKEN", TOKEN)
+    app.main(["--transport", "http", "--host", host])
+    with TestClient(
+        app.mcp.streamable_http_app(), base_url="http://localhost:8000"
+    ) as client:
+        response = client.post("/mcp", headers={**HEADERS, **auth}, json=INITIALIZE)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_http_right_token_reaches_mcp_handler(monkeypatch):
+    monkeypatch.setenv("MONARCH_MCP_HTTP_TOKEN", TOKEN)
+    app.main(["--transport", "http", "--host", "0.0.0.0"])
+    with TestClient(
+        app.mcp.streamable_http_app(), base_url="http://localhost:8000"
+    ) as client:
+        response = client.post("/mcp", headers={**HEADERS, **AUTH}, json=INITIALIZE)
+        assert rpc_result(response)["serverInfo"]["name"] == "Monarch Money MCP Server"
+
+
+@pytest.mark.parametrize(
+    "scheme",
+    ["bearer", "BEARER", "Bearer", "bEaReR"],
+)
+def test_http_accepts_bearer_scheme_case_variants(monkeypatch, scheme):
+    monkeypatch.setenv("MONARCH_MCP_HTTP_TOKEN", TOKEN)
+    app.main(["--transport", "http", "--host", "0.0.0.0"])
+    with TestClient(
+        app.mcp.streamable_http_app(), base_url="http://localhost:8000"
+    ) as client:
+        response = client.post(
+            "/mcp",
+            headers={**HEADERS, "Authorization": f"{scheme} {TOKEN}"},
+            json=INITIALIZE,
+        )
+        assert rpc_result(response)["serverInfo"]["name"] == "Monarch Money MCP Server"
+
+
+def test_http_accepts_bearer_with_extra_whitespace(monkeypatch):
+    monkeypatch.setenv("MONARCH_MCP_HTTP_TOKEN", TOKEN)
+    app.main(["--transport", "http", "--host", "0.0.0.0"])
+    with TestClient(
+        app.mcp.streamable_http_app(), base_url="http://localhost:8000"
+    ) as client:
+        response = client.post(
+            "/mcp",
+            headers={**HEADERS, "Authorization": f"Bearer  {TOKEN}"},
+            json=INITIALIZE,
+        )
+        assert rpc_result(response)["serverInfo"]["name"] == "Monarch Money MCP Server"
+
+
+def test_http_options_preflight_is_not_authenticated(monkeypatch):
+    monkeypatch.setenv("MONARCH_MCP_HTTP_TOKEN", TOKEN)
+    app.main(["--transport", "http", "--host", "0.0.0.0"])
+    with TestClient(
+        app.mcp.streamable_http_app(), base_url="http://localhost:8000"
+    ) as client:
+        response = client.options("/mcp")
+        assert response.status_code != 401

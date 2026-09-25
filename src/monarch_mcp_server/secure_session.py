@@ -301,7 +301,13 @@ class SecureMonarchSession:
         if self._use_keyring:
             logger.info("🔐 Using system keyring for token storage")
         else:
-            logger.info("🔐 Keyring unavailable — using file-based token storage")
+            logger.warning(
+                "Keyring unavailable: session will be stored in %s (plaintext "
+                "except on Windows). Install a keyring backend (e.g. Secret "
+                "Service or KWallet on Linux; see https://pypi.org/project/keyring/) "
+                "to use the system keyring.",
+                _TOKEN_FILE,
+            )
 
     # -- file-based helpers --------------------------------------------------
 

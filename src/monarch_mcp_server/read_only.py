@@ -15,6 +15,8 @@ import logging
 import os
 from typing import Any, Callable, FrozenSet, TypeVar
 
+from mcp.types import ToolAnnotations
+
 logger = logging.getLogger(__name__)
 
 ENV_VAR = "MONARCH_MCP_READ_ONLY"
@@ -76,38 +78,51 @@ def is_read_only() -> bool:
     return os.environ.get(ENV_VAR, "").strip().lower() in _TRUTHY
 
 
+def annotations_for(name: str) -> ToolAnnotations:
+    """MCP tool hints derived from MUTATING_TOOLS, so clients can tell reads from writes."""
+    if name in MUTATING_TOOLS:
+        return ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+    return ToolAnnotations(readOnlyHint=True)
+
+
 def install(mcp: Any) -> None:
-    """Make ``mcp.tool()`` skip mutating tools while read only is enabled.
+    """Wrap ``mcp.tool()`` to annotate every tool and, in read only mode, skip
+    mutating ones.
 
     Wrapping registration is what keeps this change small: every tool module
     already registers through ``@mcp.tool()``, so nothing else has to know
-    about read only mode, and the decorated function is still returned so the
-    re-exports in ``server.py`` keep working.
+    about read only mode or annotations, and the decorated function is still
+    returned so the re-exports in ``server.py`` keep working.
     """
-    if not is_read_only():
-        return
-
+    read_only = is_read_only()
     original_tool = mcp.tool
 
     def guarded_tool(*args: Any, **kwargs: Any) -> Callable[[F], F]:
-        register = original_tool(*args, **kwargs)
-
         def decorator(fn: F) -> F:
             # FastMCP.tool() takes `name` as its first positional parameter, so
             # @mcp.tool("some_name") must be honoured too. Comparing only
             # fn.__name__ would let a renamed mutating tool through the gate.
             positional = args[0] if args and isinstance(args[0], str) else None
             name = positional or kwargs.get("name") or getattr(fn, "__name__", "")
-            if name in MUTATING_TOOLS:
+            if read_only and name in MUTATING_TOOLS:
                 logger.info("Read only mode: not registering %s", name)
                 return fn
-            return register(fn)
+            register = original_tool(
+                *args, **{**kwargs, "annotations": annotations_for(str(name))}
+            )
+            return register(fn)  # type: ignore[no-any-return]
 
+        # Support bare `@mcp.tool` (no call) as well as `@mcp.tool(...)`.
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            # Route through the no-arg form so the function is not forwarded
+            # to original_tool as the positional `name`.
+            return guarded_tool()(args[0])  # type: ignore[return-value]
         return decorator
 
     mcp.tool = guarded_tool  # type: ignore[method-assign]
-    logger.warning(
-        "%s is set: %d mutating tools will not be registered",
-        ENV_VAR,
-        len(MUTATING_TOOLS),
-    )
+    if read_only:
+        logger.warning(
+            "%s is set: %d mutating tools will not be registered",
+            ENV_VAR,
+            len(MUTATING_TOOLS),
+        )

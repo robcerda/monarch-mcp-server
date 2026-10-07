@@ -4,14 +4,14 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from gql import gql
+from gql.transport.exceptions import TransportQueryError
 
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
 from monarch_mcp_server.helpers import (
+    format_exception,
     json_error,
-    json_rejected,
     json_success,
-    payload_errors,
     require_nonblank,
 )
 
@@ -323,14 +323,19 @@ def _meaningful_errors(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
     }
 
 
-async def _fetch_rule(client, rule_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch a single rule by id, or None if it does not exist."""
+async def _fetch_rules(client) -> List[Dict[str, Any]]:
+    """Fetch every transaction rule."""
     result = await client.gql_call(
         operation="GetTransactionRules",
         graphql_query=GET_TRANSACTION_RULES_QUERY,
         variables={},
     )
-    for rule in result.get("transactionRules") or []:
+    return result.get("transactionRules") or []
+
+
+async def _fetch_rule(client, rule_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single rule by id, or None if it does not exist."""
+    for rule in await _fetch_rules(client):
         if rule.get("id") == rule_id:
             return rule
     return None
@@ -885,6 +890,17 @@ async def delete_transaction_rule(rule_id: str) -> str:
         return json_error("delete_transaction_rule", e)
 
 
+# No `errors` selection here, unlike the create/update/delete rule mutations.
+# One was added by analogy with them, and from then on every reorder failed
+# against the live API with "Something went wrong while processing: None on
+# request_id: None." located at line 8, column 5 of the document gql sends
+# (print_ast output), which is exactly that `errors` selection. The error had
+# no `path`, which points to document validation rather than execution, and
+# Monarch masks unknown-field errors this way (see goals.py), so the payload
+# type most likely has no `errors` field. Other clients that send this
+# mutation select only transactionRules. Do not add `errors` back without
+# re-testing against the live API. With no errors object to read, the tool
+# confirms a move from the returned rule order instead.
 REORDER_RULE_MUTATION = gql("""
 mutation Web_UpdateRuleOrderMutation($id: ID!, $order: Int!) {
   updateTransactionRuleOrderV2(id: $id, order: $order) {
@@ -893,20 +909,56 @@ mutation Web_UpdateRuleOrderMutation($id: ID!, $order: Int!) {
       order
       __typename
     }
-    errors {
-      fieldErrors {
-        field
-        messages
-        __typename
-      }
-      message
-      code
-      __typename
-    }
     __typename
   }
 }
 """)
+
+_REORDER_WORKAROUND = (
+    "Reorder the rule by hand in Monarch's rules settings instead. "
+    "Alternatively, Monarch adds a newly created rule at the end of the order, "
+    "so re-creating this rule with create_transaction_rule and then deleting "
+    "the original with delete_transaction_rule moves it to the end. Only do "
+    "that with the user's agreement: the copy gets a new id, and any setting "
+    "create_transaction_rule cannot express (for example split, owner or "
+    "business-entity actions) would be lost."
+)
+
+
+def _order_of(rules: List[Dict[str, Any]], rule_id: str) -> Optional[int]:
+    """Return the order of ``rule_id`` in ``rules``, or None if it is absent."""
+    return next((r.get("order") for r in rules if r.get("id") == rule_id), None)
+
+
+def _reorder_rejected(
+    rule_id: str,
+    new_order: int,
+    current_order: Optional[int],
+    exc: TransportQueryError,
+) -> str:
+    """Explain a reorder that Monarch answered with GraphQL errors.
+
+    gql's message carries only the first error, so the full list is passed
+    through. Each entry's ``locations`` points into the document that was sent,
+    which is what identifies a selection the API does not accept.
+    """
+    logger.warning(
+        f"reorder_transaction_rule was rejected by Monarch: {exc.errors or exc}"
+    )
+    return json_success({
+        "success": False,
+        "tool": "reorder_transaction_rule",
+        "message": (
+            f"Monarch rejected the request to move rule {rule_id} to position "
+            f"{new_order}, so the move was not confirmed. Check "
+            "get_transaction_rules for the current order before retrying."
+        ),
+        "rule_id": rule_id,
+        "requested_order": new_order,
+        "current_order": current_order,
+        "errors": exc.errors or [format_exception(exc)],
+        "workaround": _REORDER_WORKAROUND,
+    })
 
 
 @mcp.tool()
@@ -924,6 +976,12 @@ async def reorder_transaction_rule(rule_id: str, new_order: int) -> str:
     Args:
         rule_id: Rule to move (see get_transaction_rules).
         new_order: Zero-based target position. 0 runs first.
+
+    Returns:
+        On success, moved_from, moved_to (read back from Monarch, not echoed)
+        and the resulting order of every rule. On failure, success is false
+        with the rule id, the requested and current positions, Monarch's
+        errors when it gave any, and a suggested workaround.
     """
     try:
         if new_order < 0:
@@ -932,48 +990,79 @@ async def reorder_transaction_rule(rule_id: str, new_order: int) -> str:
             })
         client = await get_monarch_client()
 
-        current = await client.gql_call(
-            operation="GetTransactionRules",
-            graphql_query=GET_TRANSACTION_RULES_QUERY,
-            variables={},
-        )
-        existing = next(
-            (r for r in current.get("transactionRules") or []
-             if r.get("id") == rule_id),
-            None,
-        )
+        before = await _fetch_rules(client)
+        existing = next((r for r in before if r.get("id") == rule_id), None)
         if existing is None:
             return json_success({
                 "success": False,
                 "message": f"No transaction rule found with id {rule_id}",
             })
+        moved_from = existing.get("order")
 
-        result = await client.gql_call(
-            operation="Web_UpdateRuleOrderMutation",
-            graphql_query=REORDER_RULE_MUTATION,
-            variables={"id": rule_id, "order": new_order},
-        )
-        # Monarch signals a refused mutation with an errors object inside an
-        # HTTP 200. Rule order decides which rule wins when two match the same
-        # transaction, so a silently ignored reorder must not read as done.
-        errors = payload_errors(result, "updateTransactionRuleOrderV2")
-        if errors:
-            return json_rejected("reorder_transaction_rule", errors)
+        try:
+            result = await client.gql_call(
+                operation="Web_UpdateRuleOrderMutation",
+                graphql_query=REORDER_RULE_MUTATION,
+                variables={"id": rule_id, "order": new_order},
+            )
+        except TransportQueryError as e:
+            return _reorder_rejected(rule_id, new_order, moved_from, e)
 
         payload = result.get("updateTransactionRuleOrderV2") or {}
         rules = payload.get("transactionRules") or []
 
-        # Read the landed position back from the response rather than echoing
-        # the argument, so the reported outcome is what Monarch actually did.
-        landed = next(
-            (r.get("order") for r in rules if r.get("id") == rule_id), None
+        # Read the landed position back rather than echoing the argument, so
+        # the reported outcome is what Monarch actually did. The payload has no
+        # errors object, so this read-back is the only evidence the move took.
+        # If the response leaves the rule out, ask for the full list again.
+        landed = _order_of(rules, rule_id)
+        if landed is None:
+            rules = await _fetch_rules(client)
+            landed = _order_of(rules, rule_id)
+        if landed is None:
+            return json_success({
+                "success": False,
+                "rule_id": rule_id,
+                "requested_order": new_order,
+                "message": (
+                    f"Could not confirm the move: rule {rule_id} was missing "
+                    "from Monarch's rule list after the request. Check "
+                    "get_transaction_rules."
+                ),
+            })
+
+        # Rule order decides which rule wins when two match the same
+        # transaction, so a silently ignored reorder must not read as done. A
+        # target past the last position legitimately leaves the last rule
+        # where it is, so only an in-range target counts as a no-op.
+        last = max(
+            (r.get("order") for r in before if isinstance(r.get("order"), int)),
+            default=None,
         )
+        if (
+            landed == moved_from != new_order
+            and last is not None
+            and new_order <= last
+        ):
+            return json_success({
+                "success": False,
+                "tool": "reorder_transaction_rule",
+                "message": (
+                    f"Monarch accepted the request to move rule {rule_id} to "
+                    f"position {new_order}, but the rule is still at position "
+                    f"{moved_from}."
+                ),
+                "rule_id": rule_id,
+                "requested_order": new_order,
+                "current_order": landed,
+                "workaround": _REORDER_WORKAROUND,
+            })
 
         return json_success({
             "success": True,
             "rule_id": rule_id,
-            "moved_from": existing.get("order"),
-            "moved_to": landed if landed is not None else new_order,
+            "moved_from": moved_from,
+            "moved_to": landed,
             "requested_order": new_order,
             "order": [
                 {"rule_id": r.get("id"), "order": r.get("order")}

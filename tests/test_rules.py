@@ -634,6 +634,242 @@ class TestUpdateTransactionRule:
         assert "needsReviewByUserAction" not in sent
 
 
+_LEGACY_CONDITIONS = [
+    {"operator": "eq", "value": "example merchant", "__typename": "Criteria"},
+    {"operator": "contains", "value": "example store", "__typename": "Criteria"},
+]
+_LEGACY_CONDITIONS_INPUT = [
+    {"operator": "eq", "value": "example merchant"},
+    {"operator": "contains", "value": "example store"},
+]
+
+
+def _legacy_rule(**overrides):
+    """A rule whose merchant condition is stored only in the legacy field.
+
+    Older rules keep it in merchantCriteria (merchant_criteria in
+    get_transaction_rules) and leave merchantNameCriteria empty.
+    """
+    fields = {
+        "id": "rule_legacy",
+        "merchantNameCriteria": None,
+        "merchantCriteria": _LEGACY_CONDITIONS,
+    }
+    fields.update(overrides)
+    return _existing_rule(**fields)
+
+
+def _sent_input(mock_client):
+    return mock_client.gql_call.call_args.kwargs["variables"]["input"]
+
+
+class TestUpdateCarriesLegacyMerchantCriteria:
+    """Regression: an action-only update of an older rule was refused.
+
+    The merge read the merchant condition only from merchantNameCriteria, so a
+    rule storing it in the legacy merchantCriteria field looked criteria-less
+    and update_transaction_rule(rule_id=..., set_category_id=...) failed with
+    "no merchant, statement or amount criteria to resend". Passing the
+    condition explicitly as merchant_criteria worked, so the carried-over
+    condition is sent the same way.
+    """
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_action_only_update_resends_legacy_condition(self, mock_get_client):
+        mock_client = _update_mock(rule=_legacy_rule())
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await update_transaction_rule(
+            rule_id="rule_legacy", set_category_id="cat_synthetic",
+        ))
+
+        assert data["success"] is True
+        assert mock_client.gql_call.call_count == 2
+        sent = _sent_input(mock_client)
+        # Each condition keeps its own operator and value, without __typename,
+        # in the field an explicit merchant_criteria argument is sent in.
+        assert sent["merchantNameCriteria"] == _LEGACY_CONDITIONS_INPUT
+        # Sent once, not echoed back in the legacy field as well.
+        assert "merchantCriteria" not in sent
+        assert sent["setCategoryAction"] == "cat_synthetic"
+        # Unrelated actions are still carried forward.
+        assert sent["setMerchantAction"] == "Existing Merchant"
+
+    @pytest.mark.parametrize("flag", [True, False])
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_legacy_rule_keeps_use_original_statement(
+        self, mock_get_client, flag
+    ):
+        """The legacy condition's flag travels with it, True or False."""
+        mock_client = _update_mock(rule=_legacy_rule(
+            merchantCriteriaUseOriginalStatement=flag,
+        ))
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await update_transaction_rule(
+            rule_id="rule_legacy", set_category_id="cat_synthetic",
+        ))
+
+        assert data["success"] is True
+        sent = _sent_input(mock_client)
+        assert sent["merchantNameCriteria"] == _LEGACY_CONDITIONS_INPUT
+        assert sent["merchantCriteriaUseOriginalStatement"] is flag
+
+    @pytest.mark.parametrize("legacy", [None, []])
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_merchant_name_criteria_rule_unchanged(
+        self, mock_get_client, legacy
+    ):
+        """Rules using the current field behave exactly as before."""
+        current = [{"operator": "contains", "value": "example merchant"}]
+        mock_client = _update_mock(rule=_existing_rule(
+            merchantNameCriteria=current, merchantCriteria=legacy,
+        ))
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await update_transaction_rule(
+            rule_id="rule_123", set_category_id="cat_synthetic",
+        ))
+
+        assert data["success"] is True
+        sent = _sent_input(mock_client)
+        assert sent["merchantNameCriteria"] == current
+        assert "merchantCriteria" not in sent
+        assert sent["setCategoryAction"] == "cat_synthetic"
+
+    @pytest.mark.parametrize("rule", [
+        _legacy_rule(),
+        _existing_rule(
+            id="rule_legacy",
+            merchantNameCriteria=[{"operator": "eq", "value": "example merchant"}],
+            merchantCriteria=None,
+        ),
+        _legacy_rule(
+            merchantNameCriteria=[{"operator": "eq", "value": "example merchant"}],
+        ),
+    ], ids=["legacy-only", "current-only", "both-fields"])
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_explicit_merchant_criteria_overrides(self, mock_get_client, rule):
+        """The caller's merchant condition replaces the stored one.
+
+        The old condition is not resent next to it from either field, so it
+        cannot be ANDed back in alongside the replacement.
+        """
+        mock_client = _update_mock(rule=rule)
+        mock_get_client.return_value = mock_client
+
+        replacement = [{"operator": "contains", "value": "replacement merchant"}]
+        data = json.loads(await update_transaction_rule(
+            rule_id="rule_legacy",
+            merchant_criteria=replacement,
+            set_category_id="cat_synthetic",
+        ))
+
+        assert data["success"] is True
+        sent = _sent_input(mock_client)
+        assert sent["merchantNameCriteria"] == replacement
+        assert "merchantCriteria" not in sent
+        assert sent["setCategoryAction"] == "cat_synthetic"
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_both_fields_with_same_condition_sent_once(self, mock_get_client):
+        """The same condition in both fields is not sent twice.
+
+        Order and __typename do not make two copies of a condition different.
+        """
+        mock_client = _update_mock(rule=_legacy_rule(
+            merchantNameCriteria=list(reversed(_LEGACY_CONDITIONS_INPUT)),
+        ))
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await update_transaction_rule(
+            rule_id="rule_legacy", set_category_id="cat_synthetic",
+        ))
+
+        assert data["success"] is True
+        sent = _sent_input(mock_client)
+        assert sent["merchantNameCriteria"] == list(
+            reversed(_LEGACY_CONDITIONS_INPUT)
+        )
+        assert "merchantCriteria" not in sent
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_both_fields_with_different_conditions_each_kept(
+        self, mock_get_client
+    ):
+        """Two different stored conditions are each resent in their own field.
+
+        Merging them into one list would OR conditions that are currently ANDed
+        and widen the rule; dropping the legacy one could lose it.
+        """
+        current = [{"operator": "contains", "value": "example merchant"}]
+        legacy = [
+            {"operator": "eq", "value": "example store", "__typename": "Criteria"}
+        ]
+        mock_client = _update_mock(rule=_legacy_rule(
+            merchantNameCriteria=current, merchantCriteria=legacy,
+        ))
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await update_transaction_rule(
+            rule_id="rule_legacy", set_category_id="cat_synthetic",
+        ))
+
+        assert data["success"] is True
+        sent = _sent_input(mock_client)
+        assert sent["merchantNameCriteria"] == current
+        assert sent["merchantCriteria"] == [
+            {"operator": "eq", "value": "example store"}
+        ]
+
+    @pytest.mark.parametrize("legacy", [None, []])
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_guard_fires_only_with_nothing_to_resend(
+        self, mock_get_client, legacy
+    ):
+        """A rule with no criteria at all is still refused before writing."""
+        mock_client = _update_mock(rule=_legacy_rule(
+            merchantCriteria=legacy,
+            merchantNameCriteria=None,
+            originalStatementCriteria=None,
+            amountCriteria=None,
+            accountIds=None,
+            categoryIds=None,
+        ))
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await update_transaction_rule(
+            rule_id="rule_legacy", set_category_id="cat_synthetic",
+        ))
+
+        assert data["success"] is False
+        assert "criteria" in data["message"]
+        # Only the read happened; nothing was written.
+        assert mock_client.gql_call.call_count == 1
+
+    @pytest.mark.parametrize("field", ["accountIds", "categoryIds"])
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_account_or_category_criterion_is_enough(
+        self, mock_get_client, field
+    ):
+        """create_transaction_rule accepts a rule matching only on accounts or
+        categories, so such a rule must not be refused as criteria-less."""
+        mock_client = _update_mock(rule=_legacy_rule(
+            merchantCriteria=None, **{field: ["synthetic_id"]},
+        ))
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await update_transaction_rule(
+            rule_id="rule_legacy", set_category_id="cat_synthetic",
+        ))
+
+        assert data["success"] is True
+        sent = _sent_input(mock_client)
+        assert sent[field] == ["synthetic_id"]
+        assert "merchantNameCriteria" not in sent
+        assert sent["setCategoryAction"] == "cat_synthetic"
+
+
 class TestDeleteTransactionRule:
     """Tests for delete_transaction_rule tool."""
 

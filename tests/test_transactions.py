@@ -719,42 +719,64 @@ class TestGetTransactions:
             offset=5,
             start_date="2026-03-01",
             account_ids=["acc-1"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_account_id_backward_compat(self, mock_monarch_client):
         await get_transactions(account_id="acc-1")
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, account_ids=["acc-1"]
+            limit=100,
+            offset=0,
+            account_ids=["acc-1"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_account_id_merged_with_account_ids(self, mock_monarch_client):
         await get_transactions(account_id="acc-1", account_ids=["acc-2"])
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, account_ids=["acc-2", "acc-1"]
+            limit=100,
+            offset=0,
+            account_ids=["acc-2", "acc-1"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_account_id_not_duplicated(self, mock_monarch_client):
         await get_transactions(account_id="acc-1", account_ids=["acc-1"])
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, account_ids=["acc-1"]
+            limit=100,
+            offset=0,
+            account_ids=["acc-1"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_search_filter(self, mock_monarch_client):
         await get_transactions(search="order-123")
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, search="order-123"
+            limit=100,
+            offset=0,
+            search="order-123",
+            transaction_visibility="all_transactions",
         )
 
     async def test_boolean_filters(self, mock_monarch_client):
         await get_transactions(has_notes=True, is_split=False, is_recurring=True)
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, has_notes=True, is_split=False, is_recurring=True
+            limit=100,
+            offset=0,
+            has_notes=True,
+            is_split=False,
+            is_recurring=True,
+            transaction_visibility="all_transactions",
         )
 
     async def test_list_filters(self, mock_monarch_client):
         await get_transactions(category_ids=["cat-1"], tag_ids=["tag-1", "tag-2"])
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, category_ids=["cat-1"], tag_ids=["tag-1", "tag-2"]
+            limit=100,
+            offset=0,
+            category_ids=["cat-1"],
+            tag_ids=["tag-1", "tag-2"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_category_group_filter_expands_to_categories(
@@ -762,13 +784,19 @@ class TestGetTransactions:
     ):
         await get_transactions(category_group_ids=["grp-1"])
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, category_ids=["cat-1", "cat-2"]
+            limit=100,
+            offset=0,
+            category_ids=["cat-1", "cat-2"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_category_group_filter_merges_category_ids(self, mock_monarch_client):
         await get_transactions(category_ids=["cat-3"], category_group_ids=["grp-1"])
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, category_ids=["cat-3", "cat-1", "cat-2"]
+            limit=100,
+            offset=0,
+            category_ids=["cat-3", "cat-1", "cat-2"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_category_group_filter_with_no_matches_returns_empty(
@@ -806,8 +834,17 @@ class TestGetTransactions:
         assert result["search"]["scan_limit"] == 200
         mock_monarch_client.get_transactions.assert_has_calls(
             [
-                call(limit=10, offset=0, search="whole foods"),
-                call(limit=200, offset=0),
+                call(
+                    limit=10,
+                    offset=0,
+                    search="whole foods",
+                    transaction_visibility="all_transactions",
+                ),
+                call(
+                    limit=200,
+                    offset=0,
+                    transaction_visibility="all_transactions",
+                ),
             ]
         )
 
@@ -837,8 +874,17 @@ class TestGetTransactions:
         assert result["search"]["server_error"] == "server search failed"
         mock_monarch_client.get_transactions.assert_has_calls(
             [
-                call(limit=10, offset=0, search="WHOLE"),
-                call(limit=200, offset=0),
+                call(
+                    limit=10,
+                    offset=0,
+                    search="WHOLE",
+                    transaction_visibility="all_transactions",
+                ),
+                call(
+                    limit=200,
+                    offset=0,
+                    transaction_visibility="all_transactions",
+                ),
             ]
         )
 
@@ -1410,3 +1456,203 @@ class TestBulkUpdateTransactions:
         assert data["total"] == 2
         assert data["updates"] == {"merchantName": "Walmart"}
         mock_monarch_client.gql_call.assert_not_called()
+
+
+def _hidden_transaction_page():
+    """One visible and one hidden row. Synthetic data only."""
+    return {
+        "allTransactions": {
+            "results": [
+                {
+                    "id": "txn-visible-1",
+                    "date": "2026-02-10",
+                    "amount": -12.00,
+                    "description": "Example Store",
+                    "category": {"id": "cat-1", "name": "Groceries"},
+                    "account": {"id": "acc-test-1", "displayName": "Test Checking"},
+                    "merchant": {"id": "mer-1", "name": "Example Store"},
+                    "needsReview": True,
+                    "hideFromReports": False,
+                    "tags": [],
+                },
+                {
+                    "id": "txn-hidden-1",
+                    "date": "2026-02-11",
+                    "amount": -30.00,
+                    "description": "Wallet Top Up",
+                    "category": {"id": "cat-9", "name": "Transfer"},
+                    "account": {"id": "acc-test-1", "displayName": "Test Checking"},
+                    "merchant": {"id": "mer-2", "name": "Example Wallet"},
+                    "needsReview": True,
+                    "hideFromReports": True,
+                    "tags": [],
+                },
+            ],
+            "totalCount": 2,
+        }
+    }
+
+
+class TestHiddenTransactionsAreNotSilentlyDropped:
+    """Monarch omits transactions hidden from reports unless asked.
+
+    The library's `transaction_visibility=None` means "only transactions that
+    are not hidden". Leaving it unset made get_transactions drop every hidden
+    row with nothing in the response to say so, which can make an account look
+    as if part of it were missing.
+    """
+
+    # get_transactions
+
+    async def test_get_transactions_includes_hidden_by_default(
+        self, mock_monarch_client
+    ):
+        mock_monarch_client.get_transactions.return_value = _hidden_transaction_page()
+
+        envelope = json.loads(await get_transactions(account_ids=["acc-test-1"]))
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert kwargs["transaction_visibility"] == "all_transactions"
+        assert envelope["args"]["include_hidden"] is True
+        hidden = {row["id"]: row["hide_from_reports"] for row in envelope["data"]}
+        assert hidden == {"txn-visible-1": False, "txn-hidden-1": True}
+
+    async def test_get_transactions_include_hidden_true_is_explicit(
+        self, mock_monarch_client
+    ):
+        await get_transactions(include_hidden=True)
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert kwargs["transaction_visibility"] == "all_transactions"
+
+    async def test_get_transactions_include_hidden_false_keeps_monarch_default(
+        self, mock_monarch_client
+    ):
+        envelope = json.loads(await get_transactions(include_hidden=False))
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert "transaction_visibility" not in kwargs
+        assert envelope["args"]["include_hidden"] is False
+
+    @pytest.mark.parametrize(
+        "include_hidden, expected",
+        [(True, "all_transactions"), (False, None)],
+    )
+    async def test_wide_search_fallback_on_empty_results_keeps_visibility(
+        self, mock_monarch_client, include_hidden, expected
+    ):
+        mock_monarch_client.get_transactions.side_effect = [
+            {"allTransactions": {"results": []}},
+            _hidden_transaction_page(),
+        ]
+
+        envelope = json.loads(
+            await get_transactions(
+                search="wallet",
+                wide_search=True,
+                include_hidden=include_hidden,
+            )
+        )
+
+        assert envelope["search"]["strategy"] == "wide"
+        assert envelope["search"]["fallback_reason"] == "empty_server_results"
+        calls = mock_monarch_client.get_transactions.call_args_list
+        assert len(calls) == 2
+        for c in calls:
+            assert c.kwargs.get("transaction_visibility") == expected
+        # The fallback drops the search text and nothing else.
+        assert "search" not in calls[1].kwargs
+        if include_hidden:
+            # The local scan matches the hidden row's description.
+            assert [row["id"] for row in envelope["data"]] == ["txn-hidden-1"]
+            assert envelope["data"][0]["hide_from_reports"] is True
+
+    @pytest.mark.parametrize(
+        "include_hidden, expected",
+        [(True, "all_transactions"), (False, None)],
+    )
+    async def test_wide_search_fallback_on_server_error_keeps_visibility(
+        self, mock_monarch_client, include_hidden, expected
+    ):
+        mock_monarch_client.get_transactions.side_effect = [
+            Exception("server search failed"),
+            _hidden_transaction_page(),
+        ]
+
+        envelope = json.loads(
+            await get_transactions(
+                search="wallet",
+                wide_search=True,
+                include_hidden=include_hidden,
+            )
+        )
+
+        assert envelope["search"]["strategy"] == "wide"
+        assert envelope["search"]["fallback_reason"] == "server_error"
+        calls = mock_monarch_client.get_transactions.call_args_list
+        assert len(calls) == 2
+        for c in calls:
+            assert c.kwargs.get("transaction_visibility") == expected
+
+    async def test_empty_category_group_result_reports_include_hidden(
+        self, mock_monarch_client
+    ):
+        envelope = json.loads(
+            await get_transactions(
+                category_group_ids=["grp-missing"], include_hidden=False
+            )
+        )
+
+        assert envelope["args"]["include_hidden"] is False
+        mock_monarch_client.get_transactions.assert_not_called()
+
+    # search_transactions
+
+    async def test_search_without_hidden_filter_returns_both_kinds(
+        self, mock_monarch_client
+    ):
+        mock_monarch_client.get_transactions.return_value = _hidden_transaction_page()
+
+        rows = json.loads(await search_transactions(search="example"))
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert kwargs["transaction_visibility"] == "all_transactions"
+        assert "hidden_from_reports" not in kwargs
+        assert {row["id"] for row in rows} == {"txn-visible-1", "txn-hidden-1"}
+
+    @pytest.mark.parametrize("hidden_from_reports", [True, False])
+    async def test_explicit_hidden_filter_is_sent_unchanged(
+        self, mock_monarch_client, hidden_from_reports
+    ):
+        """True and False keep their meaning: no visibility override is sent."""
+        await search_transactions(hidden_from_reports=hidden_from_reports)
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert kwargs["hidden_from_reports"] is hidden_from_reports
+        assert "transaction_visibility" not in kwargs
+
+    # get_transactions_needing_review
+
+    async def test_review_queue_includes_hidden_by_default(self, mock_monarch_client):
+        mock_monarch_client.get_transactions.return_value = _hidden_transaction_page()
+
+        envelope = json.loads(await get_transactions_needing_review())
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert kwargs["transaction_visibility"] == "all_transactions"
+        assert kwargs["needs_review"] is True
+        assert envelope["args"]["include_hidden"] is True
+        hidden = {row["id"]: row["hide_from_reports"] for row in envelope["data"]}
+        assert hidden == {"txn-visible-1": False, "txn-hidden-1": True}
+
+    async def test_review_queue_include_hidden_false_keeps_monarch_default(
+        self, mock_monarch_client
+    ):
+        envelope = json.loads(
+            await get_transactions_needing_review(include_hidden=False)
+        )
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert "transaction_visibility" not in kwargs
+        assert kwargs["needs_review"] is True
+        assert envelope["args"]["include_hidden"] is False

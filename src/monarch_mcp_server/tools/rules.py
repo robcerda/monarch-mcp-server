@@ -1,7 +1,8 @@
 """Transaction rules tools with GraphQL queries."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from collections import Counter
+from typing import Any, Dict, List, Optional, Tuple
 
 from gql import gql
 
@@ -233,6 +234,42 @@ def _criteria_to_input(criteria: Optional[List[Dict[str, Any]]]) -> List[Dict[st
         for c in (criteria or [])
         if c
     ]
+
+
+def _condition_key(condition: Dict[str, Any]) -> Tuple[Any, Any]:
+    return condition.get("operator"), condition.get("value")
+
+
+def _existing_merchant_criteria(
+    existing: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Read a rule's merchant condition back for an update.
+
+    Returns ``(merchant_name_criteria, legacy_merchant_criteria)`` in input
+    shape. The second is empty unless it has to be resent in its own field.
+
+    Monarch keeps the merchant condition in one of two fields. Newer rules use
+    ``merchantNameCriteria``. Older ones store it in the legacy
+    ``merchantCriteria`` (``merchant_criteria`` in get_transaction_rules) and
+    leave ``merchantNameCriteria`` empty, so reading only the newer field made
+    them look criteria-less and an action-only update was refused.
+
+    A legacy-only condition is moved into ``merchantNameCriteria``, the field
+    an explicit ``merchant_criteria`` argument is sent in, which is the path
+    known to work against the live API. It is not echoed in its own field as
+    well, which would send the same condition twice.
+
+    When a rule holds both fields, the legacy one is resent separately only if
+    it says something different. Merging the two into one list would OR
+    conditions that, as separate criteria, are ANDed, and widen the rule.
+    """
+    current = _criteria_to_input(existing.get("merchantNameCriteria"))
+    legacy = _criteria_to_input(existing.get("merchantCriteria"))
+    if not current:
+        return legacy, []
+    if Counter(map(_condition_key, legacy)) == Counter(map(_condition_key, current)):
+        return current, []
+    return current, legacy
 
 
 def _build_criteria(
@@ -603,6 +640,11 @@ async def update_transaction_rule(
     purpose, use the matching `clear_*` flag; leaving an argument unset always
     means "keep whatever is there".
 
+    The merchant condition is kept whether get_transaction_rules shows it as
+    `merchant_name_criteria` or, on older rules, as `merchant_criteria`. A
+    merchant argument below replaces it in both fields: the new condition is
+    stored as `merchant_name_criteria` and `merchant_criteria` is cleared.
+
     Args:
         rule_id: Id of the rule to update (see get_transaction_rules).
         clear_category: Remove the category action.
@@ -680,8 +722,18 @@ async def update_transaction_rule(
         # Fall back to the rule's current criteria so the mutation is never
         # criteria-less. Criteria that are omitted entirely are preserved by
         # the API, so only these need resending.
+        #
+        # An explicit merchant argument is sent in place of the stored merchant
+        # condition, whichever field holds it. Resending the old condition next
+        # to it would AND it back in. Leaving the legacy field out is not
+        # enough either: the API keeps an omitted merchantCriteria, so a rule
+        # that has one is sent an empty list to clear it (verified live).
+        legacy_merchant: List[Dict[str, Any]] = []
+        clear_legacy_merchant = False
         if merchant is None:
-            merchant = _criteria_to_input(existing.get("merchantNameCriteria"))
+            merchant, legacy_merchant = _existing_merchant_criteria(existing)
+        elif existing.get("merchantCriteria"):
+            clear_legacy_merchant = True
         if statement is None:
             statement = _criteria_to_input(existing.get("originalStatementCriteria"))
         if amount is None and existing.get("amountCriteria"):
@@ -698,22 +750,16 @@ async def update_transaction_rule(
                 ),
             }
 
-        if not (merchant or statement or amount):
-            return json_success({
-                "success": False,
-                "message": (
-                    "This rule has no merchant, statement or amount criteria to "
-                    "resend, and Monarch ignores updates that carry none. Pass "
-                    "criteria explicitly to update it."
-                ),
-            })
-
         rule_input: Dict[str, Any] = {
             "id": rule_id,
             "applyToExistingTransactions": apply_to_existing,
         }
         if merchant:
             rule_input["merchantNameCriteria"] = merchant
+        if legacy_merchant:
+            rule_input["merchantCriteria"] = legacy_merchant
+        elif clear_legacy_merchant:
+            rule_input["merchantCriteria"] = []
         if statement:
             rule_input["originalStatementCriteria"] = statement
         if amount:
@@ -727,6 +773,22 @@ async def update_transaction_rule(
             rule_input["categoryIds"] = category_ids
         elif existing.get("categoryIds"):
             rule_input["categoryIds"] = existing["categoryIds"]
+
+        # The same criteria create_transaction_rule accepts as enough for a
+        # rule. Refuse only when the input would carry none of them.
+        if not any(rule_input.get(field) for field in (
+            "merchantNameCriteria", "originalStatementCriteria",
+            "amountCriteria", "accountIds", "categoryIds",
+        )):
+            return json_success({
+                "success": False,
+                "message": (
+                    "This rule has no merchant, statement, amount, account or "
+                    "category criteria to resend, and Monarch ignores updates "
+                    "that carry none. Pass criteria explicitly to update it."
+                ),
+            })
+
         if use_original_statement is not None:
             rule_input["merchantCriteriaUseOriginalStatement"] = use_original_statement
         elif existing.get("merchantCriteriaUseOriginalStatement") is not None:
@@ -795,10 +857,6 @@ async def update_transaction_rule(
         for field in ("criteriaOwnerUserIds", "criteriaBusinessEntityIds"):
             if existing.get(field):
                 rule_input[field] = existing[field]
-        if existing.get("merchantCriteria"):
-            rule_input["merchantCriteria"] = _criteria_to_input(
-                existing["merchantCriteria"]
-            )
         if (existing.get("actionSetBusinessEntity") or {}).get("id"):
             rule_input["actionSetBusinessEntity"] = existing[
                 "actionSetBusinessEntity"]["id"]

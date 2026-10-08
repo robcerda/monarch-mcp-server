@@ -975,7 +975,8 @@ async def reorder_transaction_rule(rule_id: str, new_order: int) -> str:
 
     Args:
         rule_id: Rule to move (see get_transaction_rules).
-        new_order: Zero-based target position. 0 runs first.
+        new_order: Zero-based target position. 0 runs first. A position past
+            the end moves the rule to the end.
 
     Returns:
         On success, moved_from, moved_to (read back from Monarch, not echoed)
@@ -999,11 +1000,16 @@ async def reorder_transaction_rule(rule_id: str, new_order: int) -> str:
             })
         moved_from = existing.get("order")
 
+        # Monarch stores an out-of-range order as given rather than moving the
+        # rule to the end: checked live, a rule sent 85 with 81 rules was left
+        # at 85, a gap in the numbering. Cap the target at the last position.
+        target = min(new_order, len(before) - 1)
+
         try:
             result = await client.gql_call(
                 operation="Web_UpdateRuleOrderMutation",
                 graphql_query=REORDER_RULE_MUTATION,
-                variables={"id": rule_id, "order": new_order},
+                variables={"id": rule_id, "order": target},
             )
         except TransportQueryError as e:
             return _reorder_rejected(rule_id, new_order, moved_from, e)
@@ -1032,24 +1038,14 @@ async def reorder_transaction_rule(rule_id: str, new_order: int) -> str:
             })
 
         # Rule order decides which rule wins when two match the same
-        # transaction, so a silently ignored reorder must not read as done. A
-        # target past the last position legitimately leaves the last rule
-        # where it is, so only an in-range target counts as a no-op.
-        last = max(
-            (r.get("order") for r in before if isinstance(r.get("order"), int)),
-            default=None,
-        )
-        if (
-            landed == moved_from != new_order
-            and last is not None
-            and new_order <= last
-        ):
+        # transaction, so a silently ignored reorder must not read as done.
+        if landed == moved_from != target:
             return json_success({
                 "success": False,
                 "tool": "reorder_transaction_rule",
                 "message": (
                     f"Monarch accepted the request to move rule {rule_id} to "
-                    f"position {new_order}, but the rule is still at position "
+                    f"position {target}, but the rule is still at position "
                     f"{moved_from}."
                 ),
                 "rule_id": rule_id,

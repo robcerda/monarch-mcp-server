@@ -1089,6 +1089,53 @@ class TestReorderReportsRejection:
         assert result["moved_to"] == 2
 
     @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_target_past_the_end_is_capped_at_the_last_position(
+        self, mock_get_client
+    ):
+        """Monarch stores an out-of-range order as given, leaving a gap.
+
+        So the tool sends the last position instead, and still reports what
+        was asked for.
+        """
+        mock_client = AsyncMock()
+        mock_client.gql_call.side_effect = [
+            {"transactionRules": _three_rules()},
+            _reorder_payload(
+                {"id": "rule_b", "order": 0},
+                {"id": "rule_c", "order": 1},
+                {"id": "rule_a", "order": 2},
+            ),
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = json.loads(await reorder_transaction_rule("rule_a", 10))
+
+        sent = mock_client.gql_call.call_args_list[1].kwargs["variables"]
+        assert sent == {"id": "rule_a", "order": 2}
+        assert result["success"] is True
+        assert result["moved_from"] == 0
+        assert result["moved_to"] == 2
+        assert result["requested_order"] == 10
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_capped_move_that_did_not_happen_is_not_success(
+        self, mock_get_client
+    ):
+        """A past-the-end request for a rule that is not last must still move."""
+        mock_client = AsyncMock()
+        mock_client.gql_call.side_effect = [
+            {"transactionRules": _three_rules()},
+            _reorder_payload(*_three_rules()),
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = json.loads(await reorder_transaction_rule("rule_a", 10))
+
+        assert result["success"] is False
+        assert result["current_order"] == 0
+        assert result["requested_order"] == 10
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
     async def test_landed_position_is_read_back_not_echoed(self, mock_get_client):
         """Monarch renumbers, so the landed order can differ from the request."""
         mock_client = AsyncMock()

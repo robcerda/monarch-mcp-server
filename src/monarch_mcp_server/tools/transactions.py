@@ -49,6 +49,13 @@ KNOWN_CURRENCY_CODES = {
     "ZAR",
 }
 
+# Monarch's transaction list leaves out transactions marked "hide from
+# reports" unless the request asks for them through `transactionVisibility`.
+# Hiding is a reporting choice, not a deletion, so a tool that lists an
+# account's transactions has to opt in explicitly, or those rows disappear
+# with nothing in the response saying they were there.
+ALL_TRANSACTIONS_VISIBILITY = "all_transactions"
+
 
 def _normalize_search_text(value: Any) -> str:
     if value is None:
@@ -281,9 +288,18 @@ async def get_transactions(
     is_recurring: Optional[bool] = None,
     wide_search: bool = False,
     search_scan_limit: int = 200,
+    include_hidden: bool = True,
 ) -> str:
     """
     Get transactions from Monarch Money.
+
+    Transactions marked "hide from reports" are included by default. Monarch
+    leaves them out unless asked, so without this an account's hidden rows
+    (transfers, funding legs, duplicates) vanish from the list with nothing in
+    the response to say so, and the account looks incomplete. Every row
+    carries `hide_from_reports`, so hidden ones can be told apart or dropped
+    locally. Pass include_hidden=False to get only the transactions Monarch's
+    reports count.
 
     Args:
         limit: Number of transactions to retrieve (default: 100)
@@ -308,6 +324,10 @@ async def get_transactions(
                      comes back empty.
         search_scan_limit: Maximum transactions the wide_search fallback
                            will scan locally (default 200)
+        include_hidden: Include transactions hidden from reports (default
+                        True). False returns only transactions that are not
+                        hidden, which is Monarch's own default. Applies to
+                        the wide_search fallback too.
     """
     try:
         client = await get_monarch_client()
@@ -385,6 +405,7 @@ async def get_transactions(
                     "is_recurring": is_recurring,
                     "wide_search": wide_search,
                     "search_scan_limit": search_scan_limit,
+                    "include_hidden": include_hidden,
                 }
                 return json_success(
                     tool_response_envelope(
@@ -405,6 +426,8 @@ async def get_transactions(
             filters["is_split"] = is_split
         if is_recurring is not None:
             filters["is_recurring"] = is_recurring
+        if include_hidden:
+            filters["transaction_visibility"] = ALL_TRANSACTIONS_VISIBILITY
 
         async def _wide_search(
             reason: str, original_error: Optional[Exception] = None
@@ -418,6 +441,9 @@ async def get_transactions(
                 }
 
             scan_limit = max(limit, search_scan_limit)
+            # Everything but the search text carries over, visibility
+            # included, so the local scan covers the same rows the server
+            # search would have.
             fallback_filters = {
                 key: value for key, value in filters.items() if key != "search"
             }
@@ -500,6 +526,7 @@ async def get_transactions(
             "is_recurring": is_recurring,
             "wide_search": wide_search,
             "search_scan_limit": search_scan_limit,
+            "include_hidden": include_hidden,
         }
         total_count = first_present(
             all_transactions.get("totalCount"),
@@ -560,7 +587,9 @@ async def search_transactions(
         tag_ids: List of tag IDs to filter by
         has_attachments: Filter for transactions with/without attachments
         has_notes: Filter for transactions with/without notes
-        hidden_from_reports: Filter for transactions hidden/shown in reports
+        hidden_from_reports: True for only transactions hidden from reports,
+            False for only those shown in reports, or None (default) for
+            both. Each row's `hide_from_reports` says which it is.
         is_split: Filter for split/non-split transactions
         is_recurring: Filter for recurring/non-recurring transactions
 
@@ -590,6 +619,11 @@ async def search_transactions(
             filters["has_notes"] = has_notes
         if hidden_from_reports is not None:
             filters["hidden_from_reports"] = hidden_from_reports
+        else:
+            # No filter means both kinds. Left unset, Monarch returns only
+            # transactions that are not hidden, so None would quietly behave
+            # like False. An explicit True or False is sent as before.
+            filters["transaction_visibility"] = ALL_TRANSACTIONS_VISIBILITY
         if is_split is not None:
             filters["is_split"] = is_split
         if is_recurring is not None:
@@ -1351,6 +1385,7 @@ async def get_transactions_needing_review(
     limit: int = 100,
     offset: int = 0,
     account_id: Optional[str] = None,
+    include_hidden: bool = True,
 ) -> str:
     """
     Get transactions that need review based on various criteria.
@@ -1362,6 +1397,11 @@ async def get_transactions_needing_review(
     is an envelope carrying count, total_count and truncated, so a partial
     page is visible rather than looking like the complete answer.
 
+    Transactions hidden from reports are included by default, as in
+    get_transactions: Monarch leaves them out unless asked, so a hidden
+    transaction still flagged for review would otherwise never show up here.
+    Each row carries `hide_from_reports`.
+
     Args:
         needs_review: True for transactions flagged as needing review
             (default), False for transactions already reviewed.
@@ -1371,6 +1411,9 @@ async def get_transactions_needing_review(
         limit: Maximum number of transactions to return (default: 100)
         offset: Number of transactions to skip, for paging the queue
         account_id: Filter by specific account ID
+        include_hidden: Include transactions hidden from reports (default
+            True). False returns only transactions that are not hidden,
+            which is Monarch's own default.
 
     Returns:
         An envelope with the matching transactions under "data".
@@ -1401,6 +1444,9 @@ async def get_transactions_needing_review(
         if without_notes_only:
             filters["has_notes"] = False
 
+        if include_hidden:
+            filters["transaction_visibility"] = ALL_TRANSACTIONS_VISIBILITY
+
         transactions_data = await client.get_transactions(**filters)
         all_transactions = transactions_data.get("allTransactions") or {}
         results = all_transactions.get("results") or []
@@ -1423,6 +1469,7 @@ async def get_transactions_needing_review(
             "limit": limit,
             "offset": offset,
             "account_id": account_id,
+            "include_hidden": include_hidden,
         }
         # uncategorized_only is still applied locally, so it can shrink the
         # page below the limit. Reporting the server side total alongside it

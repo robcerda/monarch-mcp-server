@@ -909,25 +909,231 @@ class TestRangeCriteriaAreNotSilentlyDropped:
         assert sent["amountCriteria"]["valueRange"] == {"lower": 10, "upper": 50}
 
 
-class TestReorderReportsRejection:
+def _reorder_payload(*rules):
+    """A reorder response as Monarch sends it: rule order only, no errors."""
+    return {"updateTransactionRuleOrderV2": {"transactionRules": list(rules)}}
+
+
+def _three_rules():
+    return [
+        {"id": "rule_a", "order": 0},
+        {"id": "rule_b", "order": 1},
+        {"id": "rule_c", "order": 2},
+    ]
+
+
+class TestReorderMutationDocument:
+    """The document itself, which mocked gql_call never validates."""
+
+    def _payload_field(self):
+        from graphql import FieldNode, OperationDefinitionNode
+
+        from monarch_mcp_server.tools.rules import REORDER_RULE_MUTATION
+
+        document = getattr(REORDER_RULE_MUTATION, "document", REORDER_RULE_MUTATION)
+        operation = next(
+            d for d in document.definitions
+            if isinstance(d, OperationDefinitionNode)
+        )
+        field = next(
+            s for s in operation.selection_set.selections
+            if isinstance(s, FieldNode)
+        )
+        return operation, field
+
+    def test_payload_does_not_select_errors(self):
+        """Selecting `errors` here made Monarch reject every reorder.
+
+        The live API answered "Something went wrong while processing" at line
+        8, column 5 of the sent document, which was this payload's `errors`
+        selection. Do not add it back without re-testing live.
+        """
+        _, field = self._payload_field()
+        selected = {s.name.value for s in field.selection_set.selections}
+        assert selected == {"transactionRules", "__typename"}
+
+    def test_operation_shape(self):
+        from graphql import print_ast
+
+        operation, field = self._payload_field()
+        assert operation.name.value == "Web_UpdateRuleOrderMutation"
+        assert {
+            d.variable.name.value: print_ast(d.type)
+            for d in operation.variable_definitions
+        } == {"id": "ID!", "order": "Int!"}
+        assert field.name.value == "updateTransactionRuleOrderV2"
+        assert [a.name.value for a in field.arguments] == ["id", "order"]
+
     @patch("monarch_mcp_server.tools.rules.get_monarch_client")
-    async def test_refused_reorder_is_not_reported_as_success(self, mock_get_client):
-        """Rule order decides which rule wins, so a silent no-op mis-categorizes."""
+    async def test_sends_rule_id_and_order_as_given(self, mock_get_client):
         mock_client = AsyncMock()
         mock_client.gql_call.side_effect = [
-            {"transactionRules": [{"id": "r1", "order": 5}]},
-            {
-                "updateTransactionRuleOrderV2": {
-                    "transactionRules": [],
-                    "errors": {"message": "not allowed", "code": "FORBIDDEN"},
-                }
-            },
+            {"transactionRules": _three_rules()},
+            _reorder_payload(
+                {"id": "rule_b", "order": 0},
+                {"id": "rule_a", "order": 1},
+                {"id": "rule_c", "order": 2},
+            ),
         ]
         mock_get_client.return_value = mock_client
 
-        result = json.loads(await reorder_transaction_rule("r1", 0))
+        await reorder_transaction_rule("rule_b", 0)
+
+        sent = mock_client.gql_call.call_args_list[1].kwargs
+        assert sent["operation"] == "Web_UpdateRuleOrderMutation"
+        assert sent["variables"] == {"id": "rule_b", "order": 0}
+
+
+class TestReorderReportsRejection:
+    """Rule order decides which rule wins, so a failed move must say so."""
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_graphql_error_is_a_clear_rejection(self, mock_get_client):
+        from gql.transport.exceptions import TransportQueryError
+
+        masked = {
+            "message": (
+                "Something went wrong while processing: None on request_id: None."
+            ),
+            "locations": [{"line": 8, "column": 5}],
+        }
+        second = {"message": "another problem", "locations": [{"line": 1, "column": 1}]}
+        mock_client = AsyncMock()
+        mock_client.gql_call.side_effect = [
+            {"transactionRules": _three_rules()},
+            TransportQueryError(str(masked), errors=[masked, second]),
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = json.loads(await reorder_transaction_rule("rule_c", 1))
+
         assert result["success"] is False
-        assert "not allowed" in json.dumps(result)
+        assert "rejected" in result["message"]
+        assert "rule_c" in result["message"]
+        assert result["rule_id"] == "rule_c"
+        assert result["requested_order"] == 1
+        assert result["current_order"] == 2
+        # gql's message keeps only the first error; every one is passed on,
+        # locations included, since they identify what Monarch refused.
+        assert result["errors"] == [masked, second]
+        assert "create_transaction_rule" in result["workaround"]
+        assert "end" in result["workaround"]
+        assert mock_client.gql_call.call_count == 2
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_rejection_without_an_error_list(self, mock_get_client):
+        from gql.transport.exceptions import TransportQueryError
+
+        mock_client = AsyncMock()
+        mock_client.gql_call.side_effect = [
+            {"transactionRules": _three_rules()},
+            TransportQueryError("refused"),
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = json.loads(await reorder_transaction_rule("rule_c", 1))
+
+        assert result["success"] is False
+        assert result["errors"] == ["refused"]
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_transport_failure_is_not_called_a_rejection(self, mock_get_client):
+        """A dropped connection is not Monarch refusing the move."""
+        mock_client = AsyncMock()
+        mock_client.gql_call.side_effect = [
+            {"transactionRules": _three_rules()},
+            RuntimeError("connection reset"),
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = json.loads(await reorder_transaction_rule("rule_c", 1))
+
+        assert result["error"] is True
+        assert "connection reset" in result["message"]
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_in_range_move_that_did_not_happen_is_not_success(
+        self, mock_get_client
+    ):
+        """There is no errors object to read, so a no-op shows in the order."""
+        mock_client = AsyncMock()
+        mock_client.gql_call.side_effect = [
+            {"transactionRules": _three_rules()},
+            _reorder_payload(*_three_rules()),
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = json.loads(await reorder_transaction_rule("rule_b", 0))
+
+        assert result["success"] is False
+        assert result["current_order"] == 1
+        assert result["requested_order"] == 0
+        assert "workaround" in result
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_moving_the_last_rule_past_the_end_is_success(
+        self, mock_get_client
+    ):
+        """A target past the end leaves the last rule last; that is not a no-op."""
+        mock_client = AsyncMock()
+        mock_client.gql_call.side_effect = [
+            {"transactionRules": _three_rules()},
+            _reorder_payload(*_three_rules()),
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = json.loads(await reorder_transaction_rule("rule_c", 10))
+
+        assert result["success"] is True
+        assert result["moved_from"] == 2
+        assert result["moved_to"] == 2
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_target_past_the_end_is_capped_at_the_last_position(
+        self, mock_get_client
+    ):
+        """Monarch stores an out-of-range order as given, leaving a gap.
+
+        So the tool sends the last position instead, and still reports what
+        was asked for.
+        """
+        mock_client = AsyncMock()
+        mock_client.gql_call.side_effect = [
+            {"transactionRules": _three_rules()},
+            _reorder_payload(
+                {"id": "rule_b", "order": 0},
+                {"id": "rule_c", "order": 1},
+                {"id": "rule_a", "order": 2},
+            ),
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = json.loads(await reorder_transaction_rule("rule_a", 10))
+
+        sent = mock_client.gql_call.call_args_list[1].kwargs["variables"]
+        assert sent == {"id": "rule_a", "order": 2}
+        assert result["success"] is True
+        assert result["moved_from"] == 0
+        assert result["moved_to"] == 2
+        assert result["requested_order"] == 10
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_capped_move_that_did_not_happen_is_not_success(
+        self, mock_get_client
+    ):
+        """A past-the-end request for a rule that is not last must still move."""
+        mock_client = AsyncMock()
+        mock_client.gql_call.side_effect = [
+            {"transactionRules": _three_rules()},
+            _reorder_payload(*_three_rules()),
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = json.loads(await reorder_transaction_rule("rule_a", 10))
+
+        assert result["success"] is False
+        assert result["current_order"] == 0
+        assert result["requested_order"] == 10
 
     @patch("monarch_mcp_server.tools.rules.get_monarch_client")
     async def test_landed_position_is_read_back_not_echoed(self, mock_get_client):
@@ -935,15 +1141,7 @@ class TestReorderReportsRejection:
         mock_client = AsyncMock()
         mock_client.gql_call.side_effect = [
             {"transactionRules": [{"id": "r1", "order": 5}]},
-            {
-                "updateTransactionRuleOrderV2": {
-                    "transactionRules": [
-                        {"id": "r1", "order": 2},
-                        {"id": "r2", "order": 0},
-                    ],
-                    "errors": None,
-                }
-            },
+            _reorder_payload({"id": "r1", "order": 2}, {"id": "r2", "order": 0}),
         ]
         mock_get_client.return_value = mock_client
 
@@ -951,6 +1149,45 @@ class TestReorderReportsRejection:
         assert result["success"] is True
         assert result["moved_to"] == 2
         assert result["requested_order"] == 99
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_rule_missing_from_response_is_read_back(self, mock_get_client):
+        """If the response leaves the rule out, the full list is fetched again."""
+        moved = [
+            {"id": "rule_c", "order": 0},
+            {"id": "rule_a", "order": 1},
+            {"id": "rule_b", "order": 2},
+        ]
+        mock_client = AsyncMock()
+        mock_client.gql_call.side_effect = [
+            {"transactionRules": _three_rules()},
+            _reorder_payload(),
+            {"transactionRules": moved},
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = json.loads(await reorder_transaction_rule("rule_c", 0))
+
+        assert result["success"] is True
+        assert result["moved_from"] == 2
+        assert result["moved_to"] == 0
+        assert result["order"][0] == {"rule_id": "rule_c", "order": 0}
+        assert mock_client.gql_call.call_count == 3
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_unconfirmed_move_is_not_success(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_client.gql_call.side_effect = [
+            {"transactionRules": _three_rules()},
+            _reorder_payload(),
+            {"transactionRules": []},
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = json.loads(await reorder_transaction_rule("rule_c", 0))
+
+        assert result["success"] is False
+        assert "confirm" in result["message"]
 
 
 class TestRulesRejectBlankMerchantName:

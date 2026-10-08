@@ -737,23 +737,29 @@ class TestUpdateCarriesLegacyMerchantCriteria:
         assert "merchantCriteria" not in sent
         assert sent["setCategoryAction"] == "cat_synthetic"
 
-    @pytest.mark.parametrize("rule", [
-        _legacy_rule(),
-        _existing_rule(
+    @pytest.mark.parametrize("rule, legacy_sent", [
+        (_legacy_rule(), []),
+        (_existing_rule(
             id="rule_legacy",
             merchantNameCriteria=[{"operator": "eq", "value": "example merchant"}],
             merchantCriteria=None,
-        ),
-        _legacy_rule(
+        ), None),
+        (_legacy_rule(
             merchantNameCriteria=[{"operator": "eq", "value": "example merchant"}],
-        ),
+        ), []),
     ], ids=["legacy-only", "current-only", "both-fields"])
     @patch('monarch_mcp_server.tools.rules.get_monarch_client')
-    async def test_explicit_merchant_criteria_overrides(self, mock_get_client, rule):
+    async def test_explicit_merchant_criteria_overrides(
+        self, mock_get_client, rule, legacy_sent
+    ):
         """The caller's merchant condition replaces the stored one.
 
         The old condition is not resent next to it from either field, so it
-        cannot be ANDed back in alongside the replacement.
+        cannot be ANDed back in alongside the replacement. A stored legacy
+        condition is cleared with an empty list, because the API keeps a
+        merchantCriteria that is simply left out: after a merchant change the
+        old value was found still stored next to the new one, so the rule
+        required both.
         """
         mock_client = _update_mock(rule=rule)
         mock_get_client.return_value = mock_client
@@ -768,7 +774,10 @@ class TestUpdateCarriesLegacyMerchantCriteria:
         assert data["success"] is True
         sent = _sent_input(mock_client)
         assert sent["merchantNameCriteria"] == replacement
-        assert "merchantCriteria" not in sent
+        if legacy_sent is None:
+            assert "merchantCriteria" not in sent
+        else:
+            assert sent["merchantCriteria"] == legacy_sent
         assert sent["setCategoryAction"] == "cat_synthetic"
 
     @patch('monarch_mcp_server.tools.rules.get_monarch_client')

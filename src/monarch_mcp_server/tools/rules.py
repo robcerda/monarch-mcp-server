@@ -642,7 +642,8 @@ async def update_transaction_rule(
 
     The merchant condition is kept whether get_transaction_rules shows it as
     `merchant_name_criteria` or, on older rules, as `merchant_criteria`. A
-    merchant argument below is sent in its place.
+    merchant argument below replaces it in both fields: the new condition is
+    stored as `merchant_name_criteria` and `merchant_criteria` is cleared.
 
     Args:
         rule_id: Id of the rule to update (see get_transaction_rules).
@@ -724,10 +725,15 @@ async def update_transaction_rule(
         #
         # An explicit merchant argument is sent in place of the stored merchant
         # condition, whichever field holds it. Resending the old condition next
-        # to it would AND it back in.
+        # to it would AND it back in. Leaving the legacy field out is not
+        # enough either: the API keeps an omitted merchantCriteria, so a rule
+        # that has one is sent an empty list to clear it (verified live).
         legacy_merchant: List[Dict[str, Any]] = []
+        clear_legacy_merchant = False
         if merchant is None:
             merchant, legacy_merchant = _existing_merchant_criteria(existing)
+        elif existing.get("merchantCriteria"):
+            clear_legacy_merchant = True
         if statement is None:
             statement = _criteria_to_input(existing.get("originalStatementCriteria"))
         if amount is None and existing.get("amountCriteria"):
@@ -752,6 +758,8 @@ async def update_transaction_rule(
             rule_input["merchantNameCriteria"] = merchant
         if legacy_merchant:
             rule_input["merchantCriteria"] = legacy_merchant
+        elif clear_legacy_merchant:
+            rule_input["merchantCriteria"] = []
         if statement:
             rule_input["originalStatementCriteria"] = statement
         if amount:

@@ -584,6 +584,11 @@ live tool registry and the functions' signatures, so it does not drift.
 | `update_transaction_rule`         | Update an existing transaction rule                                           | `rule_id`, `merchant_criteria_operator`?, `merchant_criteria_value`?, `merchant_criteria_values`?, `merchant_criteria`?, `original_statement_operator`?, `original_statement_values`?, `original_statement_criteria`?, `use_original_statement`?, `amount_operator`?, `amount_value`?, `amount_lower`?, `amount_upper`?, `amount_is_expense`?, `set_category_id`?, `set_merchant_name`?, `add_tag_ids`?, `link_goal_id`?, `hide_from_reports`?, `review_status`?, `set_business_entity_id`?, `account_ids`?, `category_ids`?, `clear_category`?, `clear_merchant`?, `clear_tags`?, `clear_goal_link`?, `clear_review_status`?, `clear_business_entity`?, `apply_to_existing`? |
 | `upload_account_balance_history`  | Upload corrected balance snapshots for an account                             | `account_id`, `corrections`, `dry_run`?                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
+`get_household_members` returns members in `myHousehold.users`. Pass a member's
+`id` to `update_transaction(owner_user_id=...)` to assign ownership, or pass
+`owner_user_id=""` to set Shared ownership. Omitting the parameter or passing
+`null` leaves the existing owner unchanged. Pending invitations are not included.
+
 ## 📝 Usage Examples
 
 ### View Your Accounts

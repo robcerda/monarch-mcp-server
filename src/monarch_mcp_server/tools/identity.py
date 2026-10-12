@@ -177,3 +177,19 @@ async def monarch_whoami() -> str:
         })
     except Exception as e:
         return json_error("monarch_whoami", e)
+
+
+@mcp.tool()
+async def get_household_members() -> str:
+    """
+    Get household member IDs, names, display names, and roles.
+
+    Returns JSON with members in myHousehold.users. Use a member's id as
+    owner_user_id in update_transaction(). Pending invitations are not included.
+    """
+    try:
+        client = await get_monarch_client()
+        result = await client.get_household_members()
+        return json_success(result)
+    except Exception as e:
+        return json_error("get_household_members", e)

@@ -55,6 +55,49 @@ BUDGET_QUERY = gql(
 )
 
 
+# Kept separate so get_budgets retains its category-only request and response
+# contract. The summary exposes both overlapping views plus Monarch's totals.
+BUDGET_SUMMARY_QUERY = gql(
+    """
+    query MCPBudgetSummary($startDate: Date!, $endDate: Date!) {
+      budgetData(startMonth: $startDate, endMonth: $endDate) {
+        monthlyAmountsByCategory {
+          category { id }
+          monthlyAmounts {
+            month
+            plannedCashFlowAmount
+            plannedSetAsideAmount
+            actualAmount
+            remainingAmount
+          }
+        }
+        monthlyAmountsByCategoryGroup {
+          categoryGroup { id }
+          monthlyAmounts {
+            month
+            plannedCashFlowAmount
+            actualAmount
+            remainingAmount
+          }
+        }
+        totalsByMonth {
+          month
+          totalIncome { plannedAmount actualAmount }
+          totalExpenses { plannedAmount actualAmount }
+        }
+      }
+      categoryGroups {
+        id
+        name
+        type
+        groupLevelBudgetingEnabled
+        categories { id name }
+      }
+    }
+    """
+)
+
+
 def current_month_range() -> tuple[str, str]:
     """Return the current month bounds as ISO date strings."""
     today = date.today()
@@ -138,6 +181,103 @@ async def get_budgets(
         return json_success(format_budget_data(budget_data))
     except Exception as e:
         return json_error("get_budgets", e)
+
+
+@mcp.tool()
+async def get_budget_summary(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> str:
+    """Read category budgets, group budgets, and authoritative monthly totals.
+
+    Args:
+        start_date: Start month in YYYY-MM-DD format (defaults to current month).
+        end_date: End month in YYYY-MM-DD format (defaults to current month).
+
+    Returns:
+        category_budgets and group_budgets contain one row per category/group
+        per month. Each has planned, actual, remaining, and current group
+        metadata, including groupLevelBudgetingEnabled. totals_by_month is
+        Monarch's authoritative totalsByMonth response (null if unavailable).
+
+        Category and group rows overlap: never add the two sets together.
+        With group budgeting enabled, zero category plans do not mean there
+        is no group allowance. Use totals_by_month for overall totals, and
+        retain remaining amounts as returned because carryover can affect
+        them. Group metadata describes current settings, not their history.
+    """
+    try:
+        default_start, default_end = current_month_range()
+        client = await get_monarch_client()
+        result = await client.gql_call(
+            operation="MCPBudgetSummary",
+            graphql_query=BUDGET_SUMMARY_QUERY,
+            variables={
+                "startDate": start_date or default_start,
+                "endDate": end_date or default_end,
+            },
+        )
+        groups = {
+            group["id"]: group
+            for group in result.get("categoryGroups", [])
+            if group.get("id")
+        }
+        category_groups = {
+            category["id"]: group
+            for group in groups.values()
+            for category in group.get("categories", [])
+            if category.get("id")
+        }
+        category_rows = format_budget_data(result)
+        for row in category_rows:
+            group = category_groups.get(row["id"], {})
+            row.update(
+                {
+                    "category_group_id": group.get("id"),
+                    "category_group_type": group.get("type"),
+                    "groupLevelBudgetingEnabled": group.get(
+                        "groupLevelBudgetingEnabled"
+                    ),
+                }
+            )
+
+        budget_data = result.get("budgetData", {})
+        group_rows = []
+        for group_budget in budget_data.get("monthlyAmountsByCategoryGroup", []):
+            group_id = (group_budget.get("categoryGroup") or {}).get("id")
+            group = groups.get(group_id, {})
+            for amount in group_budget.get("monthlyAmounts", []):
+                group_rows.append(
+                    {
+                        "id": group_id,
+                        "name": group.get("name"),
+                        "type": group.get("type"),
+                        "groupLevelBudgetingEnabled": group.get(
+                            "groupLevelBudgetingEnabled"
+                        ),
+                        "month": amount.get("month"),
+                        "planned": amount.get("plannedCashFlowAmount"),
+                        "actual": amount.get("actualAmount"),
+                        "remaining": amount.get("remainingAmount"),
+                    }
+                )
+
+        return json_success(
+            {
+                "category_budgets": category_rows,
+                "group_budgets": group_rows,
+                "totals_by_month": budget_data.get("totalsByMonth"),
+                "aggregation_guidance": (
+                    "Category and group rows overlap; do not add them together. "
+                    "Use totals_by_month for authoritative overall totals. "
+                    "When groupLevelBudgetingEnabled is true, zero category "
+                    "plans do not mean the group has no budget. Group metadata "
+                    "reflects current settings, not historical configuration."
+                ),
+            }
+        )
+    except Exception as e:
+        return json_error("get_budget_summary", e)
 
 
 @mcp.tool()

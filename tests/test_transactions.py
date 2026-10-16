@@ -510,6 +510,9 @@ class TestGetTransactionDetails:
                 "splits": [],
             }
         }
+        mock_client.gql_call.return_value = {
+            "getTransaction": {"id": "txn_123", "businessEntity": None}
+        }
         mock_get_client.return_value = mock_client
 
         result = await get_transaction_details(transaction_id="txn_123")
@@ -520,6 +523,44 @@ class TestGetTransactionDetails:
 
         data = json.loads(result)
         assert "getTransaction" in data
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_get_details_merges_business_entity(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_client.get_transaction_details.return_value = {
+            "getTransaction": {"id": "txn_123", "amount": -2500.0, "attachments": []}
+        }
+        mock_client.gql_call.return_value = {"getTransaction": {
+            "id": "txn_123",
+            "businessEntity": {"id": "biz_1", "name": "Zinala Baking Supply"},
+        }}
+        mock_get_client.return_value = mock_client
+
+        txn = json.loads(await get_transaction_details("txn_123"))["getTransaction"]
+
+        assert txn["businessEntity"] == {"id": "biz_1", "name": "Zinala Baking Supply"}
+        assert txn["amount"] == -2500.0
+        # Must resolve the same record the drawer query did.
+        variables = mock_client.gql_call.call_args.kwargs["variables"]
+        assert variables == {"id": "txn_123", "redirectPosted": True}
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_get_details_personal_transaction_has_null_business(
+        self, mock_get_client
+    ):
+        mock_client = AsyncMock()
+        mock_client.get_transaction_details.return_value = {
+            "getTransaction": {"id": "txn_9"}
+        }
+        mock_client.gql_call.return_value = {
+            "getTransaction": {"id": "txn_9", "businessEntity": None}
+        }
+        mock_get_client.return_value = mock_client
+
+        txn = json.loads(await get_transaction_details("txn_9"))["getTransaction"]
+
+        assert "businessEntity" in txn
+        assert txn["businessEntity"] is None
 
     @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
     async def test_get_details_error(self, mock_get_client):

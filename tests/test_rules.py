@@ -1466,3 +1466,135 @@ class TestRulesRejectBlankMerchantName:
         )
         assert data["error"] is True
         mock_client.gql_call.assert_not_called()
+
+
+def _create_mock():
+    client = AsyncMock()
+    client.gql_call.return_value = {
+        "createTransactionRuleV2": {"transactionRule": {"id": "rule_new"},
+                                    "errors": None}
+    }
+    return client
+
+
+class TestRuleBusinessEntityAction:
+    """Setting, replacing and clearing a rule's business-entity action."""
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_create_sets_business_entity(self, mock_get_client):
+        mock_client = _create_mock()
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await create_transaction_rule(
+            merchant_criteria_value="managego",
+            set_business_entity_id="biz_zinala",
+        ))
+
+        assert data["success"] is True
+        sent = _sent_input(mock_client)
+        assert sent["actionSetBusinessEntity"] == "biz_zinala"
+        assert "actionSetBusinessEntityIsUnassigned" not in sent
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_create_none_marks_personal(self, mock_get_client):
+        mock_client = _create_mock()
+        mock_get_client.return_value = mock_client
+
+        await create_transaction_rule(
+            merchant_criteria_value="landlord", set_business_entity_id="None",
+        )
+
+        sent = _sent_input(mock_client)
+        assert sent["actionSetBusinessEntityIsUnassigned"] is True
+        assert "actionSetBusinessEntity" not in sent
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_create_omitted_sends_no_business_fields(self, mock_get_client):
+        mock_client = _create_mock()
+        mock_get_client.return_value = mock_client
+
+        await create_transaction_rule(merchant_criteria_value="amazon")
+
+        sent = _sent_input(mock_client)
+        assert "actionSetBusinessEntity" not in sent
+        assert "actionSetBusinessEntityIsUnassigned" not in sent
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_create_refuses_blank_business_entity(self, mock_get_client):
+        mock_client = _create_mock()
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await create_transaction_rule(
+            merchant_criteria_value="amazon", set_business_entity_id="  ",
+        ))
+
+        assert data["error"] is True
+        mock_client.gql_call.assert_not_called()
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_update_replaces_business_entity(self, mock_get_client):
+        mock_client = _update_mock()
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await update_transaction_rule(
+            rule_id="rule_123", set_business_entity_id="biz_2",
+        ))
+
+        assert data["success"] is True
+        sent = _sent_input(mock_client)
+        assert sent["actionSetBusinessEntity"] == "biz_2"
+        assert "actionSetBusinessEntityIsUnassigned" not in sent
+        # Other actions still ride along on a business-only change.
+        assert sent["setCategoryAction"] == "cat_old"
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_update_none_swaps_business_for_personal(self, mock_get_client):
+        mock_client = _update_mock()
+        mock_get_client.return_value = mock_client
+
+        await update_transaction_rule(rule_id="rule_123", set_business_entity_id="none")
+
+        sent = _sent_input(mock_client)
+        assert sent["actionSetBusinessEntityIsUnassigned"] is True
+        assert "actionSetBusinessEntity" not in sent
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_update_clear_drops_business_action(self, mock_get_client):
+        mock_client = _update_mock()
+        mock_get_client.return_value = mock_client
+
+        await update_transaction_rule(rule_id="rule_123", clear_business_entity=True)
+
+        sent = _sent_input(mock_client)
+        assert "actionSetBusinessEntity" not in sent
+        assert "actionSetBusinessEntityIsUnassigned" not in sent
+        # Clearing the action must not touch the business-entity criterion.
+        assert sent["criteriaBusinessEntityIds"] == ["biz_1"]
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_update_preserves_personal_action(self, mock_get_client):
+        rule = _existing_rule(
+            actionSetBusinessEntity=None, actionSetBusinessEntityIsUnassigned=True,
+        )
+        mock_client = _update_mock(rule=rule)
+        mock_get_client.return_value = mock_client
+
+        await update_transaction_rule(rule_id="rule_123", set_category_id="cat_new")
+
+        sent = _sent_input(mock_client)
+        assert sent["actionSetBusinessEntityIsUnassigned"] is True
+        assert "actionSetBusinessEntity" not in sent
+
+    @patch("monarch_mcp_server.tools.rules.get_monarch_client")
+    async def test_update_refuses_set_and_clear_together(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await update_transaction_rule(
+            rule_id="rule_123",
+            set_business_entity_id="biz_2",
+            clear_business_entity=True,
+        ))
+
+        assert data["error"] is True
+        mock_client.gql_call.assert_not_called()

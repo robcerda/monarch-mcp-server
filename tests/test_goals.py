@@ -1,11 +1,14 @@
 """Tests for goals MCP tools."""
 
 import json
+from datetime import date
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from monarch_mcp_server.tools.goals import (
     get_goals, update_savings_goal, get_goal_contributions,
-    set_goal_contribution,
+    set_goal_contribution, get_savings_goal_history, GOAL_HISTORY_QUERIES,
 )
 
 
@@ -286,3 +289,349 @@ class TestGoalContributions:
 
         assert data["success"] is False
         assert "Duplicate" in data["errors"]["message"]
+
+
+TODAY = date(2026, 6, 15)
+CREATED = "2026-04-01T00:00:00+00:00"
+
+# A goal's true closing balance on each day it had events. It was created on
+# Apr 1, and today's balance is 120.
+HISTORY = [
+    ("2026-04-01", 100.0),
+    ("2026-04-02", 110.0),
+    ("2026-04-04", 105.0),
+    ("2026-04-19", 130.0),
+    ("2026-05-03", 125.0),
+    ("2026-05-10", 90.0),
+    ("2026-06-01", 95.0),
+    ("2026-06-15", 120.0),
+]
+
+
+def _history_goal(goal_id="sg_1", name="Rainy Day Fund", current=120.0,
+                  created=CREATED, **overrides):
+    return _goal(id=goal_id, name=name, currentBalance=current,
+                 createdAt=created, **overrides)
+
+
+def _period_key(d, granularity):
+    if granularity == "monthly":
+        return d.replace(day=1)
+    if granularity == "annual":
+        return d.replace(month=1, day=1)
+    return d
+
+
+def _history_client(goals, history_by_goal):
+    """Serve the goal list and Monarch's history for each goal.
+
+    history_by_goal maps a goal id to its true closing balances on days with
+    events ([(date, balance)]), or to an Exception to raise. Like Monarch, a
+    request with startDate returns the running change since that date, one
+    row per period with events, dated at the period's start.
+    """
+    created = {g["id"]: g.get("createdAt") for g in goals}
+
+    async def gql_call(operation, graphql_query, variables=None):
+        if operation == "GetSavingsGoals":
+            return {"savingsGoals": goals}
+        period = next(g for g, q in GOAL_HISTORY_QUERIES.items()
+                      if q is graphql_query)
+        history = history_by_goal.get(variables["id"], [])
+        if isinstance(history, Exception):
+            raise history
+        start = date.fromisoformat(variables["startDate"])
+        if created[variables["id"]]:
+            # The creation day carries migration bookkeeping, not real change.
+            assert start > date.fromisoformat(created[variables["id"]][:10])
+        days = [(date.fromisoformat(d), b) for d, b in history]
+        before = [b for d, b in days if d < start]
+        base = before[-1] if before else 0.0
+        rows = {}
+        for d, b in days:
+            if d >= start:
+                rows[_period_key(d, period)] = b - base
+        return {"savingsGoal": {"goalEventAggregation": {"dataByPeriod": [
+            {"date": d.isoformat(), "totalSavings": v}
+            for d, v in sorted(rows.items())]}}}
+
+    c = AsyncMock()
+    c.gql_call.side_effect = gql_call
+    return c
+
+
+def _history_requests(client):
+    """(grouping period, startDate) of each history request, in order."""
+    return [
+        (next(g for g, q in GOAL_HISTORY_QUERIES.items()
+              if q is call.kwargs["graphql_query"]),
+         call.kwargs["variables"]["startDate"])
+        for call in client.gql_call.call_args_list
+        if call.kwargs["operation"] == "GetSavingsGoalHistory"
+    ]
+
+
+def _balances(series):
+    return [(p["date"], p["balance"]) for p in series]
+
+
+class TestSavingsGoalHistory:
+    """Tests for get_savings_goal_history tool."""
+
+    @pytest.fixture(autouse=True)
+    def _pin_today(self):
+        with patch('monarch_mcp_server.tools.goals._today', return_value=TODAY):
+            yield
+
+    # -- day ------------------------------------------------------------------
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_day_default_starts_at_history_start(self, mock_get_client):
+        c = _history_client([_history_goal()], {"sg_1": HISTORY})
+        mock_get_client.return_value = c
+
+        data = json.loads(await get_savings_goal_history(granularity="day"))
+
+        goal = data["goals"][0]
+        # 92 days back is Mar 16; the history starts at creation, Apr 1.
+        assert data["start_date"] == "2026-04-01"
+        assert data["end_date"] == "2026-06-15"
+        assert _balances(goal["series"]) == HISTORY
+        assert goal["start_balance"] == 100.0
+        assert goal["start_balance_date"] == "2026-04-01"
+        assert goal["end_balance"] == 120.0
+        assert goal["change"] == 20.0 and goal["change_percent"] == 20.0
+        assert data["total"] is None  # single goal: no combined total
+        # One request, counting changes from the day after creation.
+        assert _history_requests(c) == [("day", "2026-04-02")]
+        variables = c.gql_call.call_args_list[1].kwargs["variables"]
+        assert variables["today"] == "2026-06-15"
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_day_window_after_history_start(self, mock_get_client):
+        c = _history_client([_history_goal()], {"sg_1": HISTORY})
+        mock_get_client.return_value = c
+
+        data = json.loads(await get_savings_goal_history(
+            granularity="day", periods=30))
+
+        goal = data["goals"][0]
+        assert data["start_date"] == "2026-05-17"
+        assert goal["start_balance"] == 90.0  # May 10's close, unchanged since
+        assert goal["start_balance_date"] == "2026-05-16"
+        assert _balances(goal["series"]) == [
+            ("2026-06-01", 95.0), ("2026-06-15", 120.0)]
+        assert goal["change"] == 30.0
+        assert _history_requests(c) == [("day", "2026-05-17")]
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_day_window_without_changes(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal(current=130.0)],
+            {"sg_1": [("2026-04-01", 100.0), ("2026-04-19", 130.0)]})
+
+        data = json.loads(await get_savings_goal_history(
+            granularity="day", periods=10))
+
+        goal = data["goals"][0]
+        assert goal["series"] == []
+        assert goal["start_balance"] == 130.0 and goal["change"] == 0.0
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_day_total_across_goals(self, mock_get_client):
+        created = "2026-06-12T00:00:00+00:00"
+        mock_get_client.return_value = _history_client(
+            [_history_goal(current=11.0, created=created),
+             _history_goal("sg_2", "Vacation", 22.0, created=created)],
+            {"sg_1": [("2026-06-12", 9.0), ("2026-06-13", 10.0),
+                      ("2026-06-15", 11.0)],
+             "sg_2": [("2026-06-12", 19.0), ("2026-06-13", 20.0),
+                      ("2026-06-14", 22.0)]})
+
+        data = json.loads(await get_savings_goal_history(
+            granularity="day", periods=3))
+
+        total = data["total"]
+        assert _balances(total["series"]) == [
+            ("2026-06-13", 30.0), ("2026-06-14", 32.0), ("2026-06-15", 33.0)]
+        assert total["start_balance"] == 28.0  # both goals' Jun 12 closes
+        assert total["change"] == 5.0
+
+    # -- monthly and annual ---------------------------------------------------
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_monthly_default(self, mock_get_client):
+        c = _history_client([_history_goal()], {"sg_1": HISTORY})
+        mock_get_client.return_value = c
+
+        data = json.loads(await get_savings_goal_history())  # monthly default
+
+        goal = data["goals"][0]
+        assert data["granularity"] == "monthly"
+        assert data["start_date"] == "2026-04-01"  # 60 months back is before it
+        assert _balances(goal["series"]) == [
+            ("2026-04-01", 130.0), ("2026-05-01", 90.0), ("2026-06-01", 120.0)]
+        assert goal["start_balance"] == 100.0
+        assert goal["start_balance_date"] == "2026-04-01"
+        assert _history_requests(c) == [("monthly", "2026-04-02")]
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_monthly_periods(self, mock_get_client):
+        c = _history_client([_history_goal()], {"sg_1": HISTORY})
+        mock_get_client.return_value = c
+
+        data = json.loads(await get_savings_goal_history(periods=2))
+
+        goal = data["goals"][0]
+        assert data["start_date"] == "2026-05-01"
+        assert goal["start_balance"] == 130.0  # April's close
+        assert goal["start_balance_date"] == "2026-04-30"
+        assert _balances(goal["series"]) == [
+            ("2026-05-01", 90.0), ("2026-06-01", 120.0)]
+        assert goal["change"] == -10.0
+        assert _history_requests(c) == [("monthly", "2026-05-01")]
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_month_without_events_carries_balance(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal()],
+            {"sg_1": [("2026-04-01", 100.0), ("2026-04-19", 130.0),
+                      ("2026-06-01", 95.0), ("2026-06-15", 120.0)]})
+
+        data = json.loads(await get_savings_goal_history())
+
+        assert _balances(data["goals"][0]["series"]) == [
+            ("2026-04-01", 130.0), ("2026-05-01", 130.0), ("2026-06-01", 120.0)]
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_annual_defaults_to_all_history(self, mock_get_client):
+        c = _history_client(
+            [_history_goal(current=70.0, created="2025-12-20T00:00:00+00:00")],
+            {"sg_1": [("2025-12-20", 50.0), ("2025-12-28", 55.0),
+                      ("2026-03-01", 70.0)]})
+        mock_get_client.return_value = c
+
+        data = json.loads(await get_savings_goal_history(granularity="annual"))
+
+        goal = data["goals"][0]
+        assert data["start_date"] == "2025-12-20"
+        assert _balances(goal["series"]) == [
+            ("2025-01-01", 55.0), ("2026-01-01", 70.0)]
+        assert goal["start_balance"] == 50.0
+        assert _history_requests(c) == [("annual", "2025-12-21")]
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_annual_periods(self, mock_get_client):
+        c = _history_client(
+            [_history_goal(current=70.0, created="2025-12-20T00:00:00+00:00")],
+            {"sg_1": [("2025-12-20", 50.0), ("2025-12-28", 55.0),
+                      ("2026-03-01", 70.0)]})
+        mock_get_client.return_value = c
+
+        data = json.loads(await get_savings_goal_history(
+            granularity="annual", periods=1))
+
+        goal = data["goals"][0]
+        assert data["start_date"] == "2026-01-01"
+        assert _balances(goal["series"]) == [("2026-01-01", 70.0)]
+        assert goal["start_balance"] == 55.0  # 2025's close
+        assert goal["start_balance_date"] == "2025-12-31"
+        assert _history_requests(c) == [("annual", "2026-01-01")]
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_goal_created_after_window_start(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal(),
+             _history_goal("sg_2", "Vacation", 40.0,
+                           created="2026-05-01T00:00:00+00:00")],
+            {"sg_1": HISTORY,
+             "sg_2": [("2026-05-01", 30.0), ("2026-06-15", 40.0)]})
+
+        data = json.loads(await get_savings_goal_history())
+
+        late = next(g for g in data["goals"] if g["name"] == "Vacation")
+        assert late["start_balance"] == 30.0
+        assert late["start_balance_date"] == "2026-05-01"
+        assert _balances(late["series"]) == [
+            ("2026-05-01", 30.0), ("2026-06-01", 40.0)]
+        # The total counts the later goal as zero before it was created.
+        total = data["total"]
+        assert total["start_balance"] == 100.0 and total["end_balance"] == 160.0
+        assert _balances(total["series"]) == [
+            ("2026-04-01", 130.0), ("2026-05-01", 120.0), ("2026-06-01", 160.0)]
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_goal_created_today_needs_no_request(self, mock_get_client):
+        c = _history_client(
+            [_history_goal(current=50.0, created="2026-06-15T00:00:00+00:00")],
+            {"sg_1": [("2026-06-15", 50.0)]})
+        mock_get_client.return_value = c
+
+        data = json.loads(await get_savings_goal_history(granularity="day"))
+
+        goal = data["goals"][0]
+        assert _balances(goal["series"]) == [("2026-06-15", 50.0)]
+        assert goal["start_balance"] == 50.0 and goal["change"] == 0.0
+        assert _history_requests(c) == []
+
+    # -- shared behaviour -----------------------------------------------------
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_archived_at_is_not_a_filter(self, mock_get_client):
+        """Same convention as get_goals: archived_at is never used to filter."""
+        mock_get_client.return_value = _history_client(
+            [_history_goal(archivedAt="2026-01-01T00:00:00+00:00")],
+            {"sg_1": HISTORY})
+
+        data = json.loads(await get_savings_goal_history())
+
+        assert [g["goal_id"] for g in data["goals"]] == ["sg_1"]
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_name_match_ignores_case_and_whitespace(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal(name="College Fund "), _history_goal("sg_2", "Vacation")],
+            {"sg_1": HISTORY, "sg_2": HISTORY})
+
+        data = json.loads(await get_savings_goal_history(goal_name="  college fund"))
+
+        assert [g["goal_id"] for g in data["goals"]] == ["sg_1"]
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_unknown_goal_lists_available(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal(), _history_goal("sg_2", "Vacation")], {})
+
+        data = json.loads(await get_savings_goal_history(goal_name="Nope"))
+
+        assert data["success"] is False
+        assert data["available_goals"] == ["Rainy Day Fund", "Vacation"]
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_history_failure_is_an_error(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal()], {"sg_1": RuntimeError("boom")})
+
+        data = json.loads(await get_savings_goal_history())
+
+        assert data["error"] is True
+        assert data["tool"] == "get_savings_goal_history"
+        assert "boom" in data["message"]
+
+    @pytest.mark.parametrize("kwargs, message", [
+        # Only Monarch's native grouping periods are accepted.
+        ({"granularity": "weekly"},
+         "granularity must be one of day, monthly, annual"),
+        ({"granularity": "daily"}, "granularity must be one of"),
+        ({"granularity": "day", "periods": 93}, "periods must be from 1 to 92"),
+        ({"periods": 0}, "periods must be"),
+    ])
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_bad_arguments(self, mock_get_client, kwargs, message):
+        mock_get_client.return_value = _history_client(
+            [_history_goal()], {"sg_1": HISTORY})
+
+        data = json.loads(await get_savings_goal_history(**kwargs))
+
+        assert data["success"] is False
+        assert message in data["error"]

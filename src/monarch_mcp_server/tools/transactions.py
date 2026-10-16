@@ -254,6 +254,8 @@ def _format_transaction_row(
         "category_group_id": txn_category_metadata.get("group_id"),
         "account": account.get("displayName") if isinstance(account, dict) else None,
         "account_id": account.get("id") if isinstance(account, dict) else None,
+        "business_entity": _name_from_value(txn.get("businessEntity")),
+        "business_entity_id": _id_from_value(txn.get("businessEntity")),
         "merchant": _name_from_value(merchant),
         "merchant_id": _id_from_value(merchant),
         "is_pending": txn.get("isPending", txn.get("pending", False)),

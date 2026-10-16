@@ -254,6 +254,8 @@ def _format_transaction_row(
         "category_group_id": txn_category_metadata.get("group_id"),
         "account": account.get("displayName") if isinstance(account, dict) else None,
         "account_id": account.get("id") if isinstance(account, dict) else None,
+        "business_entity": _name_from_value(txn.get("businessEntity")),
+        "business_entity_id": _id_from_value(txn.get("businessEntity")),
         "merchant": _name_from_value(merchant),
         "merchant_id": _id_from_value(merchant),
         "is_pending": txn.get("isPending", txn.get("pending", False)),
@@ -641,12 +643,31 @@ async def search_transactions(
         return json_error("search_transactions", e)
 
 
+# The library's GetTransactionDrawer query does not select businessEntity, so
+# it is fetched separately and merged in. redirectPosted must match the
+# library's default, or a pending id would resolve to a different record.
+GET_TRANSACTION_BUSINESS_ENTITY_QUERY = gql("""
+query MCP_GetTransactionBusinessEntity($id: UUID!, $redirectPosted: Boolean) {
+  getTransaction(id: $id, redirectPosted: $redirectPosted) {
+    id
+    businessEntity {
+      id
+      name
+      __typename
+    }
+    __typename
+  }
+}
+""")
+
+
 @mcp.tool()
 async def get_transaction_details(transaction_id: str) -> str:
     """
     Get full details for a specific transaction.
 
-    Returns comprehensive information including attachments, splits, tags, and more.
+    Returns comprehensive information including attachments, splits, tags,
+    business entity, and more.
 
     Args:
         transaction_id: The ID of the transaction to get details for
@@ -657,6 +678,16 @@ async def get_transaction_details(transaction_id: str) -> str:
     try:
         client = await get_monarch_client()
         result = await client.get_transaction_details(transaction_id=transaction_id)
+        txn = result.get("getTransaction") if isinstance(result, dict) else None
+        if isinstance(txn, dict):
+            extra = await client.gql_call(
+                operation="MCP_GetTransactionBusinessEntity",
+                graphql_query=GET_TRANSACTION_BUSINESS_ENTITY_QUERY,
+                variables={"id": transaction_id, "redirectPosted": True},
+            )
+            txn["businessEntity"] = (extra.get("getTransaction") or {}).get(
+                "businessEntity"
+            )
         return json_success(result)
     except Exception as e:
         return json_error("get_transaction_details", e)

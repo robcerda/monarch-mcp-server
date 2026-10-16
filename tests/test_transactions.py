@@ -510,6 +510,9 @@ class TestGetTransactionDetails:
                 "splits": [],
             }
         }
+        mock_client.gql_call.return_value = {
+            "getTransaction": {"id": "txn_123", "businessEntity": None}
+        }
         mock_get_client.return_value = mock_client
 
         result = await get_transaction_details(transaction_id="txn_123")
@@ -520,6 +523,44 @@ class TestGetTransactionDetails:
 
         data = json.loads(result)
         assert "getTransaction" in data
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_get_details_merges_business_entity(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_client.get_transaction_details.return_value = {
+            "getTransaction": {"id": "txn_123", "amount": -2500.0, "attachments": []}
+        }
+        mock_client.gql_call.return_value = {"getTransaction": {
+            "id": "txn_123",
+            "businessEntity": {"id": "biz_1", "name": "Zinala Baking Supply"},
+        }}
+        mock_get_client.return_value = mock_client
+
+        txn = json.loads(await get_transaction_details("txn_123"))["getTransaction"]
+
+        assert txn["businessEntity"] == {"id": "biz_1", "name": "Zinala Baking Supply"}
+        assert txn["amount"] == -2500.0
+        # Must resolve the same record the drawer query did.
+        variables = mock_client.gql_call.call_args.kwargs["variables"]
+        assert variables == {"id": "txn_123", "redirectPosted": True}
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_get_details_personal_transaction_has_null_business(
+        self, mock_get_client
+    ):
+        mock_client = AsyncMock()
+        mock_client.get_transaction_details.return_value = {
+            "getTransaction": {"id": "txn_9"}
+        }
+        mock_client.gql_call.return_value = {
+            "getTransaction": {"id": "txn_9", "businessEntity": None}
+        }
+        mock_get_client.return_value = mock_client
+
+        txn = json.loads(await get_transaction_details("txn_9"))["getTransaction"]
+
+        assert "businessEntity" in txn
+        assert txn["businessEntity"] is None
 
     @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
     async def test_get_details_error(self, mock_get_client):
@@ -1656,3 +1697,51 @@ class TestHiddenTransactionsAreNotSilentlyDropped:
         assert "transaction_visibility" not in kwargs
         assert kwargs["needs_review"] is True
         assert envelope["args"]["include_hidden"] is False
+
+
+def _listing_rows():
+    base = {
+        "date": "2026-10-14",
+        "amount": -2500.0,
+        "merchant": {"id": "m1", "name": "Managego"},
+        "category": {"id": "cat_rent", "name": "Rent"},
+        "account": {"id": "acc_1", "displayName": "Checking"},
+    }
+    return [
+        {**base, "id": "txn_biz",
+         "businessEntity": {"id": "biz_1", "name": "Zinala Baking Supply",
+                            "__typename": "BusinessEntity"}},
+        {**base, "id": "txn_personal", "businessEntity": None},
+    ]
+
+
+class TestBusinessEntityInListings:
+    """Listing tools surface the business entity Monarch already returns."""
+
+    @staticmethod
+    def _assert_business(rows):
+        by_id = {r["id"]: r for r in rows}
+        assert by_id["txn_biz"]["business_entity"] == "Zinala Baking Supply"
+        assert by_id["txn_biz"]["business_entity_id"] == "biz_1"
+        assert by_id["txn_personal"]["business_entity"] is None
+        assert by_id["txn_personal"]["business_entity_id"] is None
+
+    async def test_get_transactions(self, mock_monarch_client):
+        mock_monarch_client.get_transactions.return_value = {
+            "allTransactions": {"results": _listing_rows(), "totalCount": 2}
+        }
+        self._assert_business(json.loads(await get_transactions())["data"])
+
+    async def test_search_transactions(self, mock_monarch_client):
+        mock_monarch_client.get_transactions.return_value = {
+            "allTransactions": {"results": _listing_rows()}
+        }
+        self._assert_business(json.loads(await search_transactions(search="managego")))
+
+    async def test_needing_review(self, mock_monarch_client):
+        mock_monarch_client.get_transactions.return_value = {
+            "allTransactions": {"results": _listing_rows(), "totalCount": 2}
+        }
+        self._assert_business(
+            json.loads(await get_transactions_needing_review(needs_review=True))["data"]
+        )

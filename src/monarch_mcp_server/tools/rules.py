@@ -438,6 +438,13 @@ async def get_transaction_rules() -> str:
                 "link_goal_action": rule.get("linkGoalAction"),
                 "hide_from_reports_action": rule.get("setHideFromReportsAction"),
                 "review_status_action": rule.get("reviewStatusAction"),
+                "set_business_entity_action": {
+                    "id": rule["actionSetBusinessEntity"].get("id"),
+                    "name": rule["actionSetBusinessEntity"].get("name"),
+                } if rule.get("actionSetBusinessEntity") else None,
+                "set_business_entity_unassigned_action": bool(
+                    rule.get("actionSetBusinessEntityIsUnassigned")
+                ),
                 "recent_application_count": rule.get("recentApplicationCount"),
                 "last_applied_at": rule.get("lastAppliedAt"),
             }

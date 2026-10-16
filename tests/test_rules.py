@@ -111,6 +111,23 @@ class TestGetTransactionRules:
         assert rules[0]["add_tags_action"][0]["name"] == "Online"
 
     @patch('monarch_mcp_server.tools.rules.get_monarch_client')
+    async def test_get_rules_shows_business_entity_action(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_client.gql_call.return_value = {"transactionRules": [
+            _existing_rule(),
+            _existing_rule(id="rule_2", actionSetBusinessEntity=None,
+                           actionSetBusinessEntityIsUnassigned=True),
+        ]}
+        mock_get_client.return_value = mock_client
+
+        rules = json.loads(await get_transaction_rules())
+
+        assert rules[0]["set_business_entity_action"] == {"id": "biz_1", "name": "Acme"}
+        assert rules[0]["set_business_entity_unassigned_action"] is False
+        assert rules[1]["set_business_entity_action"] is None
+        assert rules[1]["set_business_entity_unassigned_action"] is True
+
+    @patch('monarch_mcp_server.tools.rules.get_monarch_client')
     async def test_get_rules_empty(self, mock_get_client):
         """Test when no rules exist."""
         mock_client = AsyncMock()

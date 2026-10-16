@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import calendar
 import logging
-from datetime import date
-from typing import Any, Dict, Optional, Tuple
+from bisect import bisect_right
+from datetime import date, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
 from gql import gql
 
@@ -391,3 +393,301 @@ async def set_goal_contribution(
         })
     except Exception as e:
         return json_error("set_goal_contribution", e)
+
+
+# The query behind the goal page's timeline: Monarch's own record of a goal's
+# balance. Rows exist only on days with goal events, and the series begins when
+# the household moved to the current goals system. `today` does not bound the
+# series, so callers trim to their end date.
+#
+# We always ask for `day` and group months and years ourselves. Native `monthly`
+# gives the same end-of-period balances, but its first month also folds in
+# migration events from before the daily series starts.
+GOAL_HISTORY_QUERY = gql("""
+query GetSavingsGoalHistory($id: ID!, $today: Date!) {
+  savingsGoal(id: $id) {
+    id
+    goalEventAggregation(
+      today: $today
+      groupingPeriod: day
+      excludeEventsNotInBudget: false
+      groupEventsAfterToday: false
+    ) {
+      dataByPeriod {
+        date
+        totalSavings
+        previousTotalSavings
+        __typename
+      }
+      __typename
+    }
+    __typename
+  }
+}
+""")
+
+# The grouping periods Monarch's goal aggregation supports.
+HISTORY_GRANULARITIES = ("day", "monthly", "annual")
+
+# Parallel history requests; enough to be quick without hammering the API.
+_HISTORY_CONCURRENCY = 5
+
+_Points = List[Tuple[date, float]]
+
+
+def _today() -> date:
+    """Indirection so tests can pin "today"."""
+    return date.today()
+
+
+def _balance_at(points: _Points, d: date) -> Optional[float]:
+    """Balance at the close of day `d`: the last point on or before it."""
+    i = bisect_right(points, (d, float("inf"))) - 1
+    return points[i][1] if i >= 0 else None
+
+
+def _period_start(d: date, granularity: str) -> date:
+    if granularity == "monthly":
+        return d.replace(day=1)
+    if granularity == "annual":
+        return d.replace(month=1, day=1)
+    return d
+
+
+def _period_end(start: date, granularity: str) -> date:
+    if granularity == "monthly":
+        nxt = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return nxt - timedelta(days=1)
+    if granularity == "annual":
+        return start.replace(month=12, day=31)
+    return start
+
+
+def _build_series(
+    points: _Points, start: date, end: date, granularity: str
+) -> List[Dict[str, Any]]:
+    """Shape points into Monarch's period convention.
+
+    `day`: only days whose balance has a point (days in between are unchanged).
+    `monthly`/`annual`: one row per period, dated at the period's start, with
+    the balance at the period's close (or at `end` for the last period).
+    """
+    if granularity == "day":
+        return [
+            {"date": d.isoformat(), "balance": round(v, 2)}
+            for d, v in points
+            if start <= d <= end
+        ]
+
+    series: List[Dict[str, Any]] = []
+    period = _period_start(start, granularity)
+    while period <= end:
+        close = _period_end(period, granularity)
+        balance = _balance_at(points, min(close, end))
+        if balance is not None:
+            series.append({"date": period.isoformat(), "balance": round(balance, 2)})
+        period = close + timedelta(days=1)
+    return series
+
+
+def _summarize(
+    start_balance: Optional[float], end_balance: Optional[float]
+) -> Dict[str, Any]:
+    if start_balance is None or end_balance is None:
+        return {
+            "start_balance": start_balance,
+            "end_balance": end_balance,
+            "change": None,
+            "change_percent": None,
+        }
+    change = round(end_balance - start_balance, 2)
+    return {
+        "start_balance": round(start_balance, 2),
+        "end_balance": round(end_balance, 2),
+        "change": change,
+        "change_percent": (
+            round(change / start_balance * 100, 2) if start_balance else None
+        ),
+    }
+
+
+async def _history_points(client: Any, goal: Dict[str, Any], today: date) -> _Points:
+    result = await client.gql_call(
+        operation="GetSavingsGoalHistory",
+        graphql_query=GOAL_HISTORY_QUERY,
+        variables={"id": goal["id"], "today": today.isoformat()},
+    )
+    aggregation = (result.get("savingsGoal") or {}).get("goalEventAggregation") or {}
+    rows = sorted(
+        (
+            date.fromisoformat(row["date"][:10]),
+            row["totalSavings"],
+            row.get("previousTotalSavings"),
+        )
+        for row in aggregation.get("dataByPeriod") or []
+        if row.get("date") and row.get("totalSavings") is not None
+    )
+    points: _Points = [(d, total) for d, total, _ in rows]
+
+    # The series begins on the goal's creation date, but rows exist only on
+    # days with events. If nothing happened that day, the first row's opening
+    # balance is the balance since creation. (When the creation day does have
+    # a row, its opening figure is pre-migration bookkeeping, not a balance.)
+    created = goal.get("createdAt")
+    if created and rows and rows[0][2] is not None:
+        created_day = date.fromisoformat(created[:10])
+        if rows[0][0] > created_day:
+            points.insert(0, (created_day, rows[0][2]))
+    return points
+
+
+@mcp.tool()
+async def get_savings_goal_history(
+    goal_name: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    granularity: str = "monthly",
+) -> str:
+    """
+    Show how savings goal balances have changed over time.
+
+    Uses Monarch's own goal balance history, which begins when the household
+    moved to Monarch's current goals system; there is no history before that.
+    The latest balance is checked against the goal's reported current balance
+    (`reconciliation_diff`, normally 0).
+
+    Like get_goals, every goal is included -- `archived_at` is not used as a
+    filter.
+
+    Args:
+        goal_name: One goal to report on, matched case-insensitively against
+            the names from get_goals. Omit for every goal plus a combined total.
+        start_date: Start date, "YYYY-MM-DD". Defaults to the start of Monarch's
+            goal history; an earlier date is moved up to it.
+        end_date: End date, "YYYY-MM-DD". Defaults to today.
+        granularity: "day", "monthly", or "annual" (default "monthly"). `day`
+            lists only days when the balance changed. `monthly` and `annual`
+            give one row per period, dated at the period's start, with the
+            balance at the period's end (or at end_date for the last one).
+
+    Returns:
+        Per goal: start/end balance and change for start_date..end_date, the
+        `series`, and `warnings`. With several goals, a combined `total` too.
+        Top-level `warnings` say when the start date was moved.
+    """
+    try:
+        if granularity not in HISTORY_GRANULARITIES:
+            return json_success({
+                "success": False,
+                "error": (
+                    f"granularity must be one of {', '.join(HISTORY_GRANULARITIES)}"
+                ),
+            })
+
+        today = _today()
+        try:
+            end = date.fromisoformat(end_date) if end_date else today
+            requested_start = date.fromisoformat(start_date) if start_date else None
+        except ValueError as e:
+            return json_success({"success": False, "error": f"Invalid date: {e}"})
+
+        client = await get_monarch_client()
+        result = await client.gql_call(
+            operation="GetSavingsGoals", graphql_query=GET_GOALS_QUERY, variables={}
+        )
+        all_goals = result.get("savingsGoals") or []
+        goals = all_goals
+
+        if goal_name:
+            wanted = goal_name.strip().lower()
+            # Stored names can carry stray whitespace (e.g. "College fund ").
+            goals = [
+                g for g in all_goals if (g.get("name") or "").strip().lower() == wanted
+            ]
+            if not goals:
+                return json_success({
+                    "success": False,
+                    "error": f"No goal named '{goal_name}'",
+                    "available_goals": sorted(g.get("name") or "" for g in all_goals),
+                })
+
+        sem = asyncio.Semaphore(_HISTORY_CONCURRENCY)
+
+        async def fetch(goal: Dict[str, Any]) -> Tuple[str, _Points]:
+            async with sem:
+                return goal["id"], await _history_points(client, goal, today)
+
+        points_by_goal = dict(await asyncio.gather(*(fetch(g) for g in goals)))
+
+        warnings: List[str] = []
+        starts = [p[0][0] for p in points_by_goal.values() if p]
+        history_start = min(starts) if starts else None
+        if requested_start and history_start and requested_start < history_start:
+            warnings.append(
+                f"Monarch's goal history starts {history_start}; the requested "
+                f"start {requested_start} was moved to that date."
+            )
+            start = history_start
+        else:
+            start = requested_start or history_start or end
+        if start > end:
+            return json_success({
+                "success": False,
+                "error": f"start_date {start} is after end_date {end}",
+            })
+
+        goal_results: List[Dict[str, Any]] = []
+        all_points: List[_Points] = []
+        for goal in goals:
+            points = points_by_goal[goal["id"]]
+            all_points.append(points)
+
+            goal_warnings: List[str] = []
+            if not points:
+                goal_warnings.append("Monarch has no history for this goal yet.")
+            elif points[0][0] > start:
+                goal_warnings.append(
+                    f"Monarch's history for this goal starts {points[0][0]}; "
+                    "it has no balance before then."
+                )
+
+            start_balance = _balance_at(points, start)
+            end_balance = _balance_at(points, end)
+            reported = goal.get("currentBalance")
+            reconciliation = None
+            if end == today and end_balance is not None and reported is not None:
+                reconciliation = round(end_balance - reported, 2)
+
+            goal_results.append({
+                "goal_id": goal.get("id"),
+                "name": goal.get("name"),
+                **_summarize(start_balance, end_balance),
+                "reported_current_balance": reported,
+                "reconciliation_diff": reconciliation,
+                "series": _build_series(points, start, end, granularity),
+                "warnings": goal_warnings,
+            })
+
+        total = None
+        if len(goal_results) > 1:
+
+            def total_at(d: date) -> float:
+                return sum(_balance_at(p, d) or 0.0 for p in all_points)
+
+            merged_days = sorted({d for p in all_points for d, _ in p})
+            merged: _Points = [(d, total_at(d)) for d in merged_days]
+            total = {
+                **_summarize(total_at(start), total_at(end)),
+                "series": _build_series(merged, start, end, granularity),
+            }
+
+        return json_success({
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "granularity": granularity,
+            "goals": goal_results,
+            "total": total,
+            "warnings": warnings,
+        })
+    except Exception as e:
+        return json_error("get_savings_goal_history", e)

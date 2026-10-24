@@ -533,6 +533,10 @@ live tool registry and the functions' signatures, so it does not drift.
 | `get_account_holdings`            | Get investment holdings for a specific account                                | `account_id`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `get_account_sync_health`         | Report the health of each linked institution connection                       | `stale_after_days`?                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `get_accounts`                    | Get all financial accounts from Monarch Money                                 | None                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `get_budget_summary` | Read category/group budgets and authoritative totals without double-counting | `start_date`?, `end_date`? |
+| `get_category_group_details` | Read a group, its categories and budgeting mode | `group_id` |
+| `create_transaction_category_group` | Create a group with duplicate prevention and verified readback | `name`, `group_type`?, `dry_run`? |
+| `update_transaction_category_group` | Rename a group or switch group/category budgeting, with preview and readback | `group_id`, `name`?, `group_level_budgeting_enabled`?, `dry_run`? |
 | `get_budgets`                     | Get budget information from Monarch Money                                     | `start_date`?, `end_date`?                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `get_business_entities` | List the business entities on the Monarch account (id and name) | None |
 | `get_cashflow`                    | Get cashflow analysis from Monarch Money                                      | `start_date`?, `end_date`?                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -798,7 +802,7 @@ These tools mutate your Monarch data. The list is every registered tool that wri
 
 **Rules**: `create_transaction_rule`, `update_transaction_rule`, `delete_transaction_rule`, `reorder_transaction_rule`
 
-**Categories and budgets**: `create_transaction_category`, `update_category`, `set_budget_amount`
+**Categories and budgets**: `create_transaction_category`, `create_transaction_category_group`, `update_transaction_category_group`, `update_category`, `set_budget_amount`
 
 **Goals**: `update_savings_goal`, `set_goal_contribution`
 
@@ -843,3 +847,21 @@ To update the server:
 1. Pull latest changes from repository
 2. Restart Claude Desktop or Claude Code
 3. Re-run authentication if needed: `python login_setup.py`
+
+### Managing budget groups
+
+Use `get_category_group_details` and `get_budget_summary` before changing a
+group. `create_transaction_category_group(name="Family", dry_run=True)` previews
+creation; an existing same-name, same-type group is reused.
+`update_transaction_category_group(group_id="...", name="Core bills",
+group_level_budgeting_enabled=False, dry_run=True)` previews a rename and a switch
+to category-level budgeting. Set `dry_run=False` to apply. Group writes confirm
+the returned entity against a fresh read; after an error, inspect current groups
+before retrying because a write can succeed before verification fails.
+
+Switching budgeting mode does not migrate existing budget amounts. Reconcile
+old group targets and category targets with `set_budget_amount`, then verify
+`get_budget_summary.totals_by_month`. Category and group budget rows overlap;
+never sum both. These tools do not delete groups, move categories or reset
+rollovers. Use `update_category` for category moves. Income and expense groups
+are supported; transfer-group creation is intentionally not exposed.

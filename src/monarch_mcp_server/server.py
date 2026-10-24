@@ -74,8 +74,14 @@ from monarch_mcp_server.tools.categories import (  # noqa: F401
     get_category_details,
     get_cashflow_by_month,
 )
+from monarch_mcp_server.tools.category_groups import (  # noqa: F401
+    get_category_group_details,
+    create_transaction_category_group,
+    update_transaction_category_group,
+)
 from monarch_mcp_server.tools.budgets import (  # noqa: F401
     get_budgets,
+    get_budget_summary,
     set_budget_amount,
 )
 from monarch_mcp_server.tools.financial import (  # noqa: F401

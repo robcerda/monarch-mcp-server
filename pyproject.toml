@@ -20,7 +20,12 @@ classifiers = [
 ]
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "mcp[cli]>=1.10.0",
+    # 2.x is supported and exercised in CI, so it is not excluded. The bound
+    # is against the next unknown major: 2.x already moved host, port and
+    # transport_security off Settings onto run(), and without any bound a
+    # fresh install silently follows the next such change into a server that
+    # does not start.
+    "mcp[cli]>=1.10.0,<3",
     "monarchmoneycommunity>=1.6.0",
     "gql>=3.4",
     "keyring>=24.0.0",

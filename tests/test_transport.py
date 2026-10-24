@@ -14,10 +14,31 @@ def isolate_transport(monkeypatch):
     for suffix in ("TRANSPORT", "HOST", "PORT", "ALLOWED_HOSTS", "ALLOWED_ORIGINS"):
         monkeypatch.delenv(f"MONARCH_MCP_{suffix}", raising=False)
     monkeypatch.setattr(app.mcp, "settings", app.mcp.settings.model_copy(deep=True))
-    monkeypatch.setattr(app.mcp, "_session_manager", None)
+    # mcp 1.x caches the session manager on the server as _session_manager and
+    # reuses it, so it has to be cleared between tests. 2.x exposes it as a
+    # read-only property on the low-level server and builds one per app, so
+    # there is nothing to clear. Checking the instance dict rather than
+    # hasattr matters: in 1.x the session_manager property raises when it has
+    # not been built yet, and hasattr propagates that.
+    if "_session_manager" in vars(app.mcp):
+        monkeypatch.setattr(app.mcp, "_session_manager", None)
     run = Mock()
     monkeypatch.setattr(app.mcp, "run", run)
     return run
+
+
+def applied_http_config(run_mock):
+    """Where the host, port and transport security ended up.
+
+    mcp 1.x reads them off mcp.settings; 2.x takes them as run() keyword
+    arguments. The tests care that main() applied them, not which API the
+    installed version exposes.
+    """
+    kwargs = run_mock.call_args.kwargs
+    if "host" in kwargs:
+        return kwargs["host"], kwargs["port"], kwargs["transport_security"]
+    settings = app.mcp.settings
+    return settings.host, settings.port, settings.transport_security
 
 
 def test_default_remains_stdio(isolate_transport):
@@ -34,9 +55,9 @@ def test_environment_configures_http(monkeypatch, isolate_transport):
     )
     monkeypatch.setenv("MONARCH_MCP_ALLOWED_ORIGINS", "https://client.example.com")
     app.main([])
-    isolate_transport.assert_called_once_with(transport="streamable-http")
-    assert (app.mcp.settings.host, app.mcp.settings.port) == ("0.0.0.0", 9000)
-    security = app.mcp.settings.transport_security
+    assert isolate_transport.call_args.kwargs["transport"] == "streamable-http"
+    host, port, security = applied_http_config(isolate_transport)
+    assert (host, port) == ("0.0.0.0", 9000)
     assert security.enable_dns_rebinding_protection
     assert "server.lan:9000" in security.allowed_hosts
     assert "https://client.example.com" in security.allowed_origins
@@ -64,9 +85,9 @@ def test_cli_overrides_environment(monkeypatch, isolate_transport):
             "https://client.example.com",
         ]
     )
-    isolate_transport.assert_called_once_with(transport="streamable-http")
-    assert (app.mcp.settings.host, app.mcp.settings.port) == ("0.0.0.0", 9001)
-    security = app.mcp.settings.transport_security
+    assert isolate_transport.call_args.kwargs["transport"] == "streamable-http"
+    host, port, security = applied_http_config(isolate_transport)
+    assert (host, port) == ("0.0.0.0", 9001)
     assert "mcp.example.com" in security.allowed_hosts
     assert "server.lan:9001" in security.allowed_hosts
     assert "old.example.com" not in security.allowed_hosts
@@ -110,6 +131,31 @@ INITIALIZE = {
 }
 
 
+# mcp 1.x configures the HTTP app from global settings; 2.x takes the same
+# values as run() keyword arguments, so build_http_app forwards them.
+#
+# The rejection codes are upstream's to choose and have moved: a forged Host
+# is 421 throughout, while a refused Origin was 400 up to about mcp 1.13 and
+# is 403 by 1.30 and on 2.x. The property under test is that the request is
+# refused, so both codes are accepted rather than pinning the suite to one
+# release's choice.
+REJECTED_HOST = (421,)
+REJECTED_ORIGIN = (400, 403)
+ACCEPTED = (200,)
+
+
+def build_http_app(run_mock):
+    """Build the ASGI app the way the installed version's run() would.
+
+    Without this, 2.x would come up with default Host/Origin rules instead of
+    the ones main() computed, and the validation tests would prove nothing.
+    """
+    kwargs = dict(run_mock.call_args.kwargs)
+    kwargs.pop("transport", None)
+    kwargs.pop("port", None)  # bind time only, not an app argument
+    return app.mcp.streamable_http_app(**kwargs)
+
+
 def rpc_result(response):
     assert response.status_code == 200, response.text
     # Keep the production SSE response mode, rather than changing server settings.
@@ -119,10 +165,10 @@ def rpc_result(response):
     return json.loads(data)["result"]
 
 
-def test_http_initialize_list_and_call_tool(mock_monarch_client):
+def test_http_initialize_list_and_call_tool(mock_monarch_client, isolate_transport):
     app.main(["--transport", "http", "--host", "0.0.0.0"])
     with TestClient(
-        app.mcp.streamable_http_app(), base_url="http://localhost:8000"
+        build_http_app(isolate_transport), base_url="http://localhost:8000"
     ) as client:
         response = client.post("/mcp", headers=HEADERS, json=INITIALIZE)
         assert rpc_result(response)["serverInfo"]["name"] == "Monarch Money MCP Server"
@@ -167,23 +213,23 @@ def test_http_initialize_list_and_call_tool(mock_monarch_client):
 @pytest.mark.parametrize(
     "headers,status",
     [
-        ({"Host": "evil.example"}, 421),
-        ({"Origin": "https://evil.example"}, 400),
-        ({"Origin": "null"}, 400),
-        ({"Origin": "http://localhost"}, 200),
-        ({"Host": "localhost"}, 200),
+        ({"Host": "evil.example"}, REJECTED_HOST),
+        ({"Origin": "https://evil.example"}, REJECTED_ORIGIN),
+        ({"Origin": "null"}, REJECTED_ORIGIN),
+        ({"Origin": "http://localhost"}, ACCEPTED),
+        ({"Host": "localhost"}, ACCEPTED),
     ],
 )
-def test_http_validates_host_and_origin(headers, status):
+def test_http_validates_host_and_origin(headers, status, isolate_transport):
     app.main(["--transport", "http", "--host", "0.0.0.0"])
     with TestClient(
-        app.mcp.streamable_http_app(), base_url="http://localhost:8000"
+        build_http_app(isolate_transport), base_url="http://localhost:8000"
     ) as client:
         response = client.post("/mcp", headers={**HEADERS, **headers}, json=INITIALIZE)
-        assert response.status_code == status
+        assert response.status_code in status
 
 
-def test_http_allows_configured_remote_host_and_origin():
+def test_http_allows_configured_remote_host_and_origin(isolate_transport):
     app.main(
         [
             "--transport",
@@ -195,7 +241,7 @@ def test_http_allows_configured_remote_host_and_origin():
         ]
     )
     with TestClient(
-        app.mcp.streamable_http_app(), base_url="https://mcp.example.com"
+        build_http_app(isolate_transport), base_url="https://mcp.example.com"
     ) as client:
         response = client.post(
             "/mcp",

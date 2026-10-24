@@ -149,7 +149,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mcp-version: ["1.13.1", "2.3.0"]
+        # The declared floor and the current 2.x release.
+        mcp-version: ["1.22.0", "2.3.0"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

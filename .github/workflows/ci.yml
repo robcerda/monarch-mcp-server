@@ -136,3 +136,43 @@ jobs:
       # --no-sync because the step above already built the environment.
       - name: Run tests
         run: uv run --no-sync pytest -q
+
+  # The locked set pins one mcp release, but the constraint allows the whole
+  # 1.x and 2.x range and users install across it. 2.x moved host, port and
+  # transport_security off Settings onto run(), so a change that quietly
+  # depends on either shape would pass the job above and still break a real
+  # install. This runs the suite against the edges of what is allowed.
+  mcp-compatibility:
+    name: Tests (mcp ${{ matrix.mcp-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # The declared floor and the current 2.x release.
+        mcp-version: ["1.22.0", "2.3.0"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          checksum: ${{ env.UV_CHECKSUM }}
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+
+      # Deliberately re-resolves just this one package, which is the point of
+      # the job. Everything else stays on the locked, hash-verified set.
+      - name: Pin mcp to ${{ matrix.mcp-version }}
+        run: uv pip install "mcp[cli]==${{ matrix.mcp-version }}"
+
+      - name: Run tests
+        run: uv run --no-sync pytest -q
+        env:
+          # Never touch the runner's credential store.
+          PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring

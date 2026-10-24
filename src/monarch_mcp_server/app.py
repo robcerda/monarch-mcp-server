@@ -44,8 +44,11 @@ import monarch_mcp_server.tools  # noqa: E402, F401
 _build_streamable_http_app = mcp.streamable_http_app
 
 
-def _streamable_http_app_without_slash_redirect():  # type: ignore[no-untyped-def]
-    http_app = _build_streamable_http_app()
+def _streamable_http_app_without_slash_redirect(*args, **kwargs):  # type: ignore[no-untyped-def]
+    # Arguments are forwarded: mcp 1.x builds the app with no arguments, but
+    # 2.x passes the host and transport security through here, so swallowing
+    # them would silently drop the Host/Origin validation.
+    http_app = _build_streamable_http_app(*args, **kwargs)
     http_app.router.redirect_slashes = False
     return http_app
 
@@ -113,14 +116,13 @@ def main(argv: list[str] | None = None) -> None:
     if not args.host.strip():
         parser.error("HTTP host must not be empty")
 
+    run_kwargs: dict = {}
     if args.transport != "stdio":
         from mcp.server.transport_security import TransportSecuritySettings
 
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
         # Listening on all interfaces must not disable Host/Origin validation.
         # Remote clients explicitly allow their public hostname (including port).
-        mcp.settings.transport_security = TransportSecuritySettings(
+        security = TransportSecuritySettings(
             allowed_hosts=[
                 "localhost",
                 "localhost:*",
@@ -148,13 +150,27 @@ def main(argv: list[str] | None = None) -> None:
                 ),
             ],
         )
+        # mcp 1.x reads host, port and transport_security off Settings. 2.x
+        # removed those fields and takes them as run() keyword arguments
+        # instead, so assigning them there raises. Pick by what the installed
+        # Settings model actually declares rather than by version number.
+        if "host" in type(mcp.settings).__pydantic_fields__:
+            mcp.settings.host = args.host
+            mcp.settings.port = args.port
+            mcp.settings.transport_security = security
+        else:
+            run_kwargs = {
+                "host": args.host,
+                "port": args.port,
+                "transport_security": security,
+            }
 
     logger.info("Starting Monarch Money MCP Server (%s)...", args.transport)
     try:
         if args.transport == "stdio":
             mcp.run()
         else:
-            mcp.run(transport="streamable-http")
+            mcp.run(transport="streamable-http", **run_kwargs)
     except Exception as e:
         logger.error(f"Failed to run server: {str(e)}")
         raise

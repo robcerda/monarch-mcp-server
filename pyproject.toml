@@ -20,7 +20,18 @@ classifiers = [
 ]
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "mcp[cli]>=1.10.0",
+    # Floor is 1.22.0, not 1.10.0: every release below it imports
+    # eval_type_backport from a pydantic internal that pydantic 2.14 removed,
+    # and those releases allow pydantic <3, so the broken pairing resolves
+    # cleanly and then fails at import. pip cannot express "this mcp only
+    # with that pydantic", so the floor carries it. A resolution error beats
+    # an ImportError on first run.
+    #
+    # 2.x is supported and exercised in CI. The upper bound is against the
+    # next unknown major: 2.x already moved host, port and transport_security
+    # off Settings onto run(), and unbounded, a fresh install would follow
+    # the next such change into a server that does not start.
+    "mcp[cli]>=1.22.0,<3",
     "monarchmoneycommunity>=1.6.0",
     "gql>=3.4",
     "keyring>=24.0.0",

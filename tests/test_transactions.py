@@ -563,6 +563,29 @@ class TestGetTransactionDetails:
         assert txn["businessEntity"] is None
 
     @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_business_entity_failure_does_not_fail_the_whole_read(
+        self, mock_get_client
+    ):
+        """Businesses are a plan feature, so the follow-up query can fail on an
+        account that works fine otherwise. Details the drawer query already
+        returned must still come back."""
+        mock_client = AsyncMock()
+        mock_client.get_transaction_details.return_value = {
+            "getTransaction": {"id": "txn_7", "amount": -42.0, "notes": "keep me"}
+        }
+        mock_client.gql_call.side_effect = RuntimeError(
+            "Cannot query field 'businessEntity' on type 'Transaction'"
+        )
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await get_transaction_details("txn_7"))
+
+        assert "error" not in data
+        txn = data["getTransaction"]
+        assert txn["amount"] == -42.0
+        assert txn["notes"] == "keep me"
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
     async def test_get_details_error(self, mock_get_client):
         """Test error handling."""
         mock_get_client.side_effect = RuntimeError("Transaction not found")

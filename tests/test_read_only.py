@@ -115,6 +115,13 @@ class TestGateCannotSilentlyMissANewWriteTool:
     """
 
     # Library calls that write. Derived from the upstream client surface.
+    # Leading verbs that mark a library call as a write. Used for calls that
+    # are resolved by name rather than written out, where there is no literal
+    # client.<method>( for the check below to find.
+    WRITING_VERBS = frozenset(
+        {"create", "update", "delete", "set", "bulk", "add", "remove", "reorder"}
+    )
+
     WRITING_CLIENT_METHODS = frozenset(
         {
             "create_transaction",
@@ -194,6 +201,21 @@ class TestGateCannotSilentlyMissANewWriteTool:
                 r"graphql_query\s*=\s*([A-Za-z_][A-Za-z0-9_]*)", source
             ):
                 if self._is_mutation_document(getattr(module, ident, None)):
+                    mutating.add(name)
+
+            # A tool can also reach a writing library call without ever
+            # writing client.<method>( literally, by resolving it first:
+            #     updater = getattr(client, "update_flexible_budget", None)
+            #     await updater(...)
+            # The literal check above sees nothing, and the name need not be
+            # in WRITING_CLIENT_METHODS to be a write, so the verb decides.
+            # Keeping this heuristic separate means a new writing method does
+            # not have to be added to the list by hand to be caught.
+            for resolved in re.findall(
+                r"getattr\(\s*client\s*,\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']",
+                source,
+            ):
+                if resolved.split("_")[0] in self.WRITING_VERBS:
                     mutating.add(name)
         return mutating, ro
 

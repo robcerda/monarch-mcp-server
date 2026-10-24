@@ -680,14 +680,25 @@ async def get_transaction_details(transaction_id: str) -> str:
         result = await client.get_transaction_details(transaction_id=transaction_id)
         txn = result.get("getTransaction") if isinstance(result, dict) else None
         if isinstance(txn, dict):
-            extra = await client.gql_call(
-                operation="MCP_GetTransactionBusinessEntity",
-                graphql_query=GET_TRANSACTION_BUSINESS_ENTITY_QUERY,
-                variables={"id": transaction_id, "redirectPosted": True},
-            )
-            txn["businessEntity"] = (extra.get("getTransaction") or {}).get(
-                "businessEntity"
-            )
+            # Best effort. Businesses are a plan feature and this is a second
+            # query for one optional field, so a failure here must not take
+            # down details the drawer query already returned. Breaking a
+            # working read to add a field is how reorder_transaction_rule
+            # broke (#170).
+            try:
+                extra = await client.gql_call(
+                    operation="MCP_GetTransactionBusinessEntity",
+                    graphql_query=GET_TRANSACTION_BUSINESS_ENTITY_QUERY,
+                    variables={"id": transaction_id, "redirectPosted": True},
+                )
+                txn["businessEntity"] = (extra.get("getTransaction") or {}).get(
+                    "businessEntity"
+                )
+            except Exception as business_error:
+                logger.warning(
+                    "get_transaction_details could not read businessEntity: %s",
+                    business_error,
+                )
         return json_success(result)
     except Exception as e:
         return json_error("get_transaction_details", e)

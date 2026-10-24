@@ -227,6 +227,18 @@ mutation Common_DeleteTransactionRule($id: ID!) {
 # ---------------------------------------------------------------------------
 
 
+def _business_entity_action(business_entity_id: str) -> Dict[str, Any]:
+    """Rule-input fields for a business-entity action.
+
+    Mirrors set_business_entity: an id assigns that business, the literal
+    "none" marks matching transactions as personal (unassigned).
+    """
+    require_nonblank(business_entity_id, "set_business_entity_id")
+    if business_entity_id.strip().lower() == "none":
+        return {"actionSetBusinessEntityIsUnassigned": True}
+    return {"actionSetBusinessEntity": business_entity_id.strip()}
+
+
 def _criteria_to_input(criteria: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """Convert criteria as returned by the API back into mutation-input shape."""
     return [
@@ -426,6 +438,13 @@ async def get_transaction_rules() -> str:
                 "link_goal_action": rule.get("linkGoalAction"),
                 "hide_from_reports_action": rule.get("setHideFromReportsAction"),
                 "review_status_action": rule.get("reviewStatusAction"),
+                "set_business_entity_action": {
+                    "id": rule["actionSetBusinessEntity"].get("id"),
+                    "name": rule["actionSetBusinessEntity"].get("name"),
+                } if rule.get("actionSetBusinessEntity") else None,
+                "set_business_entity_unassigned_action": bool(
+                    rule.get("actionSetBusinessEntityIsUnassigned")
+                ),
                 "recent_application_count": rule.get("recentApplicationCount"),
                 "last_applied_at": rule.get("lastAppliedAt"),
             }
@@ -457,6 +476,7 @@ async def create_transaction_rule(
     link_goal_id: Optional[str] = None,
     hide_from_reports: Optional[bool] = None,
     review_status: Optional[str] = None,
+    set_business_entity_id: Optional[str] = None,
     account_ids: Optional[List[str]] = None,
     category_ids: Optional[List[str]] = None,
     apply_to_existing: bool = False,
@@ -497,6 +517,9 @@ async def create_transaction_rule(
             requires account_ids to be set as well.
         hide_from_reports: Hide matching transactions from reports.
         review_status: Review status to set, e.g. "needs_review".
+        set_business_entity_id: Business to assign matching transactions to
+            (id from get_business_entities), or "none" to mark them personal.
+            Requires a Monarch plan with businesses.
         account_ids: Restrict the rule to these accounts. This is a matching
             criterion, not an action.
         category_ids: Restrict the rule to transactions already in these
@@ -515,6 +538,10 @@ async def create_transaction_rule(
     try:
         if set_merchant_name is not None:
             require_nonblank(set_merchant_name, "set_merchant_name")
+        business_action = (
+            _business_entity_action(set_business_entity_id)
+            if set_business_entity_id is not None else {}
+        )
 
         client = await get_monarch_client()
 
@@ -571,6 +598,7 @@ async def create_transaction_rule(
             rule_input["setHideFromReportsAction"] = hide_from_reports
         if review_status:
             rule_input["reviewStatusAction"] = review_status
+        rule_input.update(business_action)
 
         result = await client.gql_call(
             operation="Common_CreateTransactionRuleMutationV2",
@@ -616,6 +644,7 @@ async def update_transaction_rule(
     link_goal_id: Optional[str] = None,
     hide_from_reports: Optional[bool] = None,
     review_status: Optional[str] = None,
+    set_business_entity_id: Optional[str] = None,
     account_ids: Optional[List[str]] = None,
     category_ids: Optional[List[str]] = None,
     clear_category: bool = False,
@@ -623,6 +652,7 @@ async def update_transaction_rule(
     clear_tags: bool = False,
     clear_goal_link: bool = False,
     clear_review_status: bool = False,
+    clear_business_entity: bool = False,
     apply_to_existing: bool = False,
 ) -> str:
     """
@@ -657,6 +687,9 @@ async def update_transaction_rule(
         clear_tags: Remove all tag actions.
         clear_goal_link: Remove the goal link.
         clear_review_status: Remove the review-status action.
+        clear_business_entity: Remove the business-entity action entirely, so
+            the rule no longer touches a transaction's business. Differs from
+            set_business_entity_id="none", which actively marks it personal.
         merchant_criteria_operator: Operator shared by merchant_criteria_values
             ("contains" or "eq"). Defaults to "contains".
         merchant_criteria_value: Single merchant name/pattern to match.
@@ -685,6 +718,9 @@ async def update_transaction_rule(
             requires account_ids to be set as well.
         hide_from_reports: Hide matching transactions from reports.
         review_status: Review status to set, e.g. "needs_review".
+        set_business_entity_id: Business to assign matching transactions to
+            (id from get_business_entities), or "none" to mark them personal.
+            Replaces any existing business-entity action.
         account_ids: Restrict the rule to these accounts. This is a matching
             criterion, not an action.
         category_ids: Restrict the rule to transactions already in these
@@ -697,6 +733,14 @@ async def update_transaction_rule(
     try:
         if set_merchant_name is not None:
             require_nonblank(set_merchant_name, "set_merchant_name")
+        if set_business_entity_id is not None and clear_business_entity:
+            raise ValueError(
+                "Pass set_business_entity_id or clear_business_entity, not both."
+            )
+        new_business_action = (
+            _business_entity_action(set_business_entity_id)
+            if set_business_entity_id is not None else None
+        )
 
         client = await get_monarch_client()
 
@@ -850,21 +894,29 @@ async def update_transaction_rule(
         if review:
             rule_input["reviewStatusAction"] = review
 
+        # The business-entity action is one of two mutually exclusive fields
+        # (a business id, or "unassigned" = personal), so it is merged as a
+        # pair rather than field by field.
+        if new_business_action is not None:
+            rule_input.update(new_business_action)
+        elif not clear_business_entity:
+            if (existing.get("actionSetBusinessEntity") or {}).get("id"):
+                rule_input["actionSetBusinessEntity"] = existing[
+                    "actionSetBusinessEntity"]["id"]
+            elif existing.get("actionSetBusinessEntityIsUnassigned"):
+                rule_input["actionSetBusinessEntityIsUnassigned"] = True
+
         # Plan-gated and less common fields. These are carried forward but not
-        # exposed as arguments: business entities require a paid Monarch plan
-        # and owner fields require household collaboration, so on most accounts
-        # they are simply absent and these lines are no-ops.
+        # exposed as arguments: owner fields require household collaboration,
+        # so on most accounts they are simply absent and these lines are no-ops.
         for field in ("sendNotificationAction", "setLinkToPaydownBudgetAction",
-                      "actionSetOwnerIsJoint", "actionSetBusinessEntityIsUnassigned",
+                      "actionSetOwnerIsJoint",
                       "criteriaOwnerIsJoint", "criteriaBusinessEntityIsUnassigned"):
             if existing.get(field):
                 rule_input[field] = existing[field]
         for field in ("criteriaOwnerUserIds", "criteriaBusinessEntityIds"):
             if existing.get(field):
                 rule_input[field] = existing[field]
-        if (existing.get("actionSetBusinessEntity") or {}).get("id"):
-            rule_input["actionSetBusinessEntity"] = existing[
-                "actionSetBusinessEntity"]["id"]
         if (existing.get("actionSetOwner") or {}).get("id"):
             rule_input["actionSetOwner"] = existing["actionSetOwner"]["id"]
         # Savings goals are a separate collection from goalsV2 with their own

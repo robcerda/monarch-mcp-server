@@ -549,7 +549,7 @@ live tool registry and the functions' signatures, so it does not drift.
 | `get_net_worth` | Get net worth history over time | `start_date`?, `end_date`?, `account_type`? |
 | `get_net_worth_by_account_type` | Get net worth breakdown by account type over time | `start_date`, `timeframe`? |
 | `get_recurring_transactions` | Get recurring merchant forecasts and synced liability bills | `start_date`?, `end_date`?, `include_liabilities`?, `limit`?, `offset`?, `include_metadata`? |
-| `get_savings_goal_history` | Show how savings goal balances have changed, up to today | `goal_name`?, `granularity`?, `periods`? |
+| `get_savings_goal_history` | Show how savings goal balances have changed, up to today | `goal_name`?, `granularity`?, `periods`?, `breakdown`? |
 | `get_spending_summary` | Get a spending summary broken down by category, category group, and merchant | `start_date`?, `end_date`? |
 | `get_transaction_categories` | Get all available transaction categories from Monarch Money | None |
 | `get_transaction_category_groups` | Get all transaction category groups (parent groupings for categories) | None |

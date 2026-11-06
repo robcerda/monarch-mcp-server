@@ -22,18 +22,26 @@ classifiers = [
 ]
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    # Floor is 1.22.0, not 1.10.0: every release below it imports
-    # eval_type_backport from a pydantic internal that pydantic 2.14 removed,
-    # and those releases allow pydantic <3, so the broken pairing resolves
-    # cleanly and then fails at import. pip cannot express "this mcp only
-    # with that pydantic", so the floor carries it. A resolution error beats
-    # an ImportError on first run.
+    # Floor is 1.30.0 because of #153, a remotely triggerable denial of
+    # service in the HTTP transport. Up to and including 1.29.1 the session
+    # manager registers a transport before the Host check runs, so every
+    # rejected request leaks a session that is never freed, and a protocol
+    # correct DELETE leaves its entry behind too. Measured on the versions
+    # themselves: 150 requests with a forged Host leak 150 sessions on
+    # 1.22.0 through 1.29.1, and none on 1.30.0. Reachable from any page the
+    # user visits, so the floor carries it rather than a note in the docs.
+    #
+    # Separately, every release below 1.22.0 imports eval_type_backport from
+    # a pydantic internal that pydantic 2.14 removed, while allowing
+    # pydantic <3, so that pairing resolves cleanly and then fails at import.
+    # pip cannot express "this mcp only with that pydantic", so the floor
+    # covers that too. A resolution error beats an ImportError on first run.
     #
     # 2.x is supported and exercised in CI. The upper bound is against the
     # next unknown major: 2.x already moved host, port and transport_security
     # off Settings onto run(), and unbounded, a fresh install would follow
     # the next such change into a server that does not start.
-    "mcp[cli]>=1.22.0,<3",
+    "mcp[cli]>=1.30.0,<3",
     "monarchmoneycommunity>=1.7.1",
     "gql>=3.4",
     "keyring>=24.0.0",

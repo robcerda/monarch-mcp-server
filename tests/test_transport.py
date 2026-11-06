@@ -210,6 +210,85 @@ def test_http_initialize_list_and_call_tool(mock_monarch_client, isolate_transpo
         assert client.delete("/mcp", headers=headers).status_code == 200
 
 
+def live_sessions():
+    """The session manager's live transport registry, or None if not built.
+
+    mcp 1.x keeps the manager on the server as _session_manager; 2.x exposes
+    it as a read-only property on the low-level server. Read through
+    __getattribute__ rather than hasattr, because the 1.x session_manager
+    property raises when the manager has not been built yet.
+    """
+    for holder in (app.mcp, getattr(app.mcp, "_lowlevel_server", None)):
+        if holder is None:
+            continue
+        manager = None
+        try:
+            manager = object.__getattribute__(holder, "_session_manager")
+        except AttributeError:
+            try:
+                manager = holder.session_manager
+            except Exception:
+                manager = None
+        if manager is not None:
+            registry = getattr(manager, "_server_instances", None)
+            if registry is not None:
+                return registry
+    return None
+
+
+class TestRejectedRequestsDoNotLeakSessions:
+    """#153: the session manager used to register a transport before the Host
+    check ran, so every rejected request leaked a session that was never
+    freed, and a protocol correct DELETE left its entry behind as well.
+
+    Measured against the releases themselves: 150 requests with a forged Host
+    leak 150 sessions on mcp 1.22.0 through 1.29.1, and none on 1.30.0, which
+    is why that is the declared floor. This holds the property so a future
+    bump or a transport change cannot quietly reintroduce it.
+    """
+
+    def test_a_forged_host_leaves_no_session_behind(self, isolate_transport):
+        app.main(["--transport", "http", "--host", "0.0.0.0"])
+        with TestClient(
+            build_http_app(isolate_transport), base_url="http://localhost:8000"
+        ) as client:
+            registry = live_sessions()
+            assert registry is not None, "could not find the session registry"
+            assert len(registry) == 0
+
+            for _ in range(25):
+                refused = client.post(
+                    "/mcp",
+                    headers={**HEADERS, "Host": "evil.example"},
+                    json=INITIALIZE,
+                )
+                assert refused.status_code in REJECTED_HOST
+            assert len(registry) == 0, (
+                f"{len(registry)} sessions retained for requests that were "
+                "refused before any session should have existed"
+            )
+
+    def test_a_session_is_released_on_delete(self, mock_monarch_client, isolate_transport):
+        app.main(["--transport", "http", "--host", "0.0.0.0"])
+        with TestClient(
+            build_http_app(isolate_transport), base_url="http://localhost:8000"
+        ) as client:
+            registry = live_sessions()
+            assert registry is not None
+
+            opened = client.post("/mcp", headers=HEADERS, json=INITIALIZE)
+            assert opened.status_code == 200
+            session_id = opened.headers["mcp-session-id"]
+            assert len(registry) == 1
+
+            headers = {**HEADERS, "mcp-session-id": session_id}
+            assert client.delete("/mcp", headers=headers).status_code == 200
+            assert len(registry) == 0, (
+                "the session outlived the DELETE that closed it, so a client "
+                "reconnecting on a timer would grow the process until it died"
+            )
+
+
 @pytest.mark.parametrize(
     "headers,status",
     [

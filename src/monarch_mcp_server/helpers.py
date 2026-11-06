@@ -2,9 +2,56 @@
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Monarch's aggregate queries return every bucket they have — a full year runs to
+# hundreds of categories and thousands of merchants, which overflows the MCP
+# response limit. Rows are only trimmed when a response would actually exceed the
+# budget, stepping down this ladder of per-breakdown caps until it fits.
+MAX_RESPONSE_CHARS = 45_000
+LIMIT_LADDER = (100, 50, 20, 10, 5)
+
+
+def strip_typenames(value: Any) -> Any:
+    """Recursively drop GraphQL ``__typename`` keys from a payload."""
+    if isinstance(value, dict):
+        return {k: strip_typenames(v) for k, v in value.items() if k != "__typename"}
+    if isinstance(value, list):
+        return [strip_typenames(item) for item in value]
+    return value
+
+
+def breakdown(rows: List[Dict[str, Any]], limit: Optional[int]) -> Dict[str, Any]:
+    """Wrap ranked ``rows`` so any cap applied is visible to the caller."""
+    capped = rows[:limit] if limit else rows
+    return {
+        "total": len(rows),
+        "returned": len(capped),
+        "truncated": len(capped) < len(rows),
+        "rows": capped,
+    }
+
+
+def render_within_budget(
+    render: Callable[[Optional[int]], str], limit: Optional[int]
+) -> str:
+    """Render the largest response that fits under ``MAX_RESPONSE_CHARS``.
+
+    ``render`` takes the per-breakdown cap to apply (None for no cap) and returns
+    the serialized response. An explicit *limit* is honoured as-is — including 0,
+    which means "never trim" — and otherwise the cap steps down the ladder only
+    as far as it must.
+    """
+    if limit is not None:
+        return render(limit or None)
+
+    for applied in (None, *LIMIT_LADDER):
+        rendered = render(applied)
+        if len(rendered) <= MAX_RESPONSE_CHARS:
+            return rendered
+    return rendered
 
 
 def format_exception(exc: Exception) -> str:

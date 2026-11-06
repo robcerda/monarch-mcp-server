@@ -518,7 +518,7 @@ tool does not enable it or refresh institutions.
 
 ## 🛠️ Available Tools
 
-All 67 registered tools. Required parameters are listed first, optional ones
+All 68 registered tools. Required parameters are listed first, optional ones
 are marked with a trailing question mark. This table is generated from the
 live tool registry and the functions' signatures, so it does not drift.
 
@@ -544,7 +544,7 @@ live tool registry and the functions' signatures, so it does not drift.
 | `get_budget_summary` | Read category budgets, group budgets, and authoritative monthly totals | `start_date`?, `end_date`? |
 | `get_budgets` | Get budget information from Monarch Money | `start_date`?, `end_date`? |
 | `get_business_entities` | List the business entities on the Monarch account (id and name) | None |
-| `get_cashflow` | Get cashflow analysis from Monarch Money | `start_date`?, `end_date`? |
+| `get_cashflow` | Get cashflow analysis from Monarch Money | `start_date`?, `end_date`?, `limit`? |
 | `get_cashflow_by_month` | Get spending trends over time, broken down by category and month | `start_date`, `end_date` |
 | `get_category_details` | Get a single category's details including budget amounts for a month | `category_id`, `month`? |
 | `get_category_group_details` | Read one group's name, categories and group/category budgeting mode | `group_id` |
@@ -557,7 +557,7 @@ live tool registry and the functions' signatures, so it does not drift.
 | `get_net_worth_by_account_type` | Get net worth breakdown by account type over time | `start_date`, `timeframe`? |
 | `get_recurring_transactions` | Get recurring merchant forecasts and synced liability bills | `start_date`?, `end_date`?, `include_liabilities`?, `limit`?, `offset`?, `include_metadata`? |
 | `get_savings_goal_history` | Show how savings goal balances have changed, up to today | `goal_name`?, `granularity`?, `periods`?, `breakdown`? |
-| `get_spending_summary` | Get a spending summary broken down by category, category group, and merchant | `start_date`?, `end_date`? |
+| `get_spending_summary` | Get a spending summary broken down by category, category group, and merchant | `start_date`?, `end_date`?, `limit`? |
 | `get_transaction_categories` | Get all available transaction categories from Monarch Money | None |
 | `get_transaction_category_groups` | Get all transaction category groups (parent groupings for categories) | None |
 | `get_transaction_details` | Get full details for a specific transaction | `transaction_id` |
@@ -568,7 +568,7 @@ live tool registry and the functions' signatures, so it does not drift.
 | `get_transactions_needing_review` | Get transactions that need review based on various criteria | `needs_review`?, `days`?, `uncategorized_only`?, `without_notes_only`?, `limit`?, `offset`?, `account_id`?, `include_hidden`? |
 | `get_transactions_summary` | Get a high-level summary of transactions | None |
 | `mark_transaction_reviewed` | Mark a transaction as reviewed (clears the needs_review flag) | `transaction_id` |
-| `merge_merchants` | Merge one merchant into another, deleting the source | `source_merchant_id`, `target_merchant_id` |
+| `merge_merchants` | Merge one merchant into another, deleting the source. Cannot be undone | `source_merchant_id`, `target_merchant_id` |
 | `monarch_login` | Sign in via a secure form in the client UI | None |
 | `monarch_login_with_token` | Sign in with a browser copied session token | None |
 | `monarch_logout` | Clear the stored session and drop the cached client | None |

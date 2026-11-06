@@ -34,7 +34,7 @@ dependencies = [
     # off Settings onto run(), and unbounded, a fresh install would follow
     # the next such change into a server that does not start.
     "mcp[cli]>=1.22.0,<3",
-    "monarchmoneycommunity>=1.6.0",
+    "monarchmoneycommunity>=1.7.1",
     "gql>=3.4",
     "keyring>=24.0.0",
     "python-dotenv>=1.0.0",

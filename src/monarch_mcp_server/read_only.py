@@ -58,6 +58,7 @@ MUTATING_TOOLS: FrozenSet[str] = frozenset(
         "set_goal_contribution",
         # Merchants
         "update_merchant",
+        "merge_merchants",
         "review_recurring_stream",
         # Session mutation. Logging out or replacing the stored session is a
         # change to durable state, and a read only deployment should not be

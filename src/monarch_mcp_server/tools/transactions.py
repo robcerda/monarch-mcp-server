@@ -953,12 +953,10 @@ async def bulk_update_transactions(
     you select transactions and edit them, so a set of any size costs one round
     trip rather than one per transaction.
 
-    Reassigning `merchant_name` is how two merchant records are merged. Monarch
-    exposes no merge endpoint, and `update_merchant` cannot rename one merchant
-    onto another (it fails with "A merchant with this name already exists"), so
-    pointing every transaction at the canonical name is the only route. A name
-    that already exists attaches to that record; a new one creates it, so copy
-    the spelling exactly.
+    To merge one merchant into another, use `merge_merchants`, which also removes
+    the source record. Reassigning `merchant_name` moves only the listed
+    transactions. A name that already exists attaches to that record; a new one
+    creates it, so copy the spelling exactly.
 
     This endpoint is all or nothing. It reports `affectedCount` for the batch
     rather than a result per transaction, so a partial failure is not something

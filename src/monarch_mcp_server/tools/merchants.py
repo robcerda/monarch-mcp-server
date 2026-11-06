@@ -348,3 +348,58 @@ async def review_recurring_stream(
         )
     except Exception as e:
         return json_error("review_recurring_stream", e)
+
+
+@mcp.tool()
+async def merge_merchants(source_merchant_id: str, target_merchant_id: str) -> str:
+    """
+    Merge one merchant into another, deleting the source. Cannot be undone.
+
+    This is the "Merge & delete" action in Monarch's Edit merchant dialog: the
+    source merchant's transactions move to the target and the source record is
+    removed. Check both merchants with get_merchant first.
+
+    Args:
+        source_merchant_id: The merchant to merge away. It is deleted.
+        target_merchant_id: The merchant to keep.
+
+    Returns:
+        Success flag and both merchant IDs.
+
+    Example:
+        Merge a duplicate spelling into the canonical merchant:
+            merge_merchants(
+                source_merchant_id="160319777541808781",
+                target_merchant_id="160319777541808782",
+            )
+    """
+    try:
+        source_merchant_id = source_merchant_id.strip()
+        target_merchant_id = target_merchant_id.strip()
+
+        # A blank target must not reach the client: without a target, Monarch
+        # deletes the merchant rather than merging it.
+        require_nonblank(source_merchant_id, "source_merchant_id")
+        require_nonblank(target_merchant_id, "target_merchant_id")
+        if source_merchant_id == target_merchant_id:
+            raise ValueError("source_merchant_id and target_merchant_id must differ")
+
+        client = await get_monarch_client()
+        result = await client.delete_merchant(
+            source_merchant_id, move_to_merchant_id=target_merchant_id
+        )
+
+        # The mutation reports a success flag, so read it rather than inferring
+        # the merge took from the absence of an exception.
+        if not (result.get("deleteMerchant") or {}).get("success"):
+            return json_success({"success": False, "result": result})
+
+        return json_success(
+            {
+                "success": True,
+                "source_merchant_id": source_merchant_id,
+                "target_merchant_id": target_merchant_id,
+            }
+        )
+    except Exception as e:
+        return json_error("merge_merchants", e)

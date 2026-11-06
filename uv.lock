@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12, <3.15"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -241,15 +241,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/5b/18/774bddb96bc0dc0a2b8ac2d2a0e686639744378883da0fc3b96a54192d7a/autocommand-2.2.2.tar.gz", hash = "sha256:878de9423c5596491167225c2a455043c3130fb5b7286ac83443d45e74955f34", size = 22894, upload-time = "2022-11-18T19:15:49.755Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b5/62/05203c39d21aa3171454a6c5391ea3b582a97bfb1bc1adad25628331a1cd/autocommand-2.2.2-py3-none-any.whl", hash = "sha256:710afe251075e038e19e815e25f8155cabe02196cfb545b2185e0d9c8b2b0459", size = 19377, upload-time = "2022-11-18T19:15:48.052Z" },
-]
-
-[[package]]
-name = "backoff"
-version = "2.2.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/47/d7/5bbeb12c44d7c4f2fb5b56abce497eb5ed9f34d85701de869acedd602619/backoff-2.2.1.tar.gz", hash = "sha256:03f829f5bb1923180821643f8753b0502c3b682293992485b0eef2807afa5cba", size = 17001, upload-time = "2022-10-05T19:19:32.061Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/df/73/b6e24bd22e6720ca8ee9a85a0c4a2971af8497d8f3193fa05390cbd46e09/backoff-2.2.1-py3-none-any.whl", hash = "sha256:63579f9a0628e06278f7e47b7d7d5b6ce20dc65c5e96a6f3ca99a6adca0396e8", size = 15148, upload-time = "2022-10-05T19:19:30.546Z" },
 ]
 
 [[package]]
@@ -553,26 +544,26 @@ wheels = [
 
 [[package]]
 name = "gql"
-version = "4.0.0"
+version = "4.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
-    { name = "backoff" },
     { name = "graphql-core" },
+    { name = "tenacity" },
     { name = "yarl" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/06/9f/cf224a88ed71eb223b7aa0b9ff0aa10d7ecc9a4acdca2279eb046c26d5dc/gql-4.0.0.tar.gz", hash = "sha256:f22980844eb6a7c0266ffc70f111b9c7e7c7c13da38c3b439afc7eab3d7c9c8e", size = 215644, upload-time = "2025-08-17T14:32:35.397Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/85/95/15fdc8ef0b3a5333a019ad1ade6097b3251a599637e9d477e938da97a030/gql-4.4.0.tar.gz", hash = "sha256:e54fe470d51347ceb46a04fc88c5553695d2d8c86b05bef13aeee8b8f2d5f61a", size = 234190, upload-time = "2026-09-27T16:40:07.193Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ac/94/30bbd09e8d45339fa77a48f5778d74d47e9242c11b3cd1093b3d994770a5/gql-4.0.0-py3-none-any.whl", hash = "sha256:f3beed7c531218eb24d97cb7df031b4a84fdb462f4a2beb86e2633d395937479", size = 89900, upload-time = "2025-08-17T14:32:34.029Z" },
+    { url = "https://files.pythonhosted.org/packages/75/c4/3c28d6e7d73072d1d94f4a4162f5ef6031f7b5a6fd420841fb4b78e8b9f7/gql-4.4.0-py3-none-any.whl", hash = "sha256:150ffd909a8814f14c9ca19ec9410afd572443253789d57e7efd6b92cc24d8f7", size = 96213, upload-time = "2026-09-27T16:40:06.031Z" },
 ]
 
 [[package]]
 name = "graphql-core"
-version = "3.2.13"
+version = "3.3.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/4e/5e/aa0d4e701b50db0bab71b125dd19ddb0f98c638d008d6f7e3d8ce9cbc92e/graphql_core-3.2.13.tar.gz", hash = "sha256:bb81dd266d4ab7b591bd976f1b23639d97776cb9ac1a896b4a93c271e11ed618", size = 577471, upload-time = "2026-09-27T12:22:57.136Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a4/91/223fbace7c8648690d7fb77855e29bd248c9ed1e0833ed3002ab29bc1441/graphql_core-3.3.1.tar.gz", hash = "sha256:8d9b6f95fb66b58b260904cf9e191f422782620533ec8fa0c96ab941b6659a2a", size = 751402, upload-time = "2026-10-25T09:34:09.764Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1f/b4/b52a324b0b297ddc49b8ea31a51d39fae63132f694a267b9381d94e2e0af/graphql_core-3.2.13-py3-none-any.whl", hash = "sha256:b0eb04f2c31556b2310a77c8fb53c74e8b56570f8fea594d89c6ef7827dbb497", size = 268191, upload-time = "2026-09-27T12:22:55.661Z" },
+    { url = "https://files.pythonhosted.org/packages/57/0e/e51b006267e7fa785abf5d1f86a7d60b84f7f893e3ba4fe23df9be2000cf/graphql_core-3.3.1-py3-none-any.whl", hash = "sha256:43ebcd0d9a0662a71b1a2f6562ba863d253057ec11cbc45835b2e2683a0a3770", size = 349047, upload-time = "2026-10-25T09:34:07.725Z" },
 ]
 
 [[package]]
@@ -916,7 +907,7 @@ requires-dist = [
     { name = "isort", marker = "extra == 'dev'", specifier = ">=5.12.0" },
     { name = "keyring", specifier = ">=24.0.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.22.0,<3" },
-    { name = "monarchmoneycommunity", specifier = ">=1.6.0" },
+    { name = "monarchmoneycommunity", specifier = ">=1.7.1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
@@ -928,16 +919,16 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "monarchmoneycommunity"
-version = "1.6.0"
+version = "1.7.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "gql" },
     { name = "oathtool" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/08/38/405cf4ec61093a682dca9c36014e09d6c4c5a968ee045c3e59a192e5c58c/monarchmoneycommunity-1.6.0.tar.gz", hash = "sha256:86cf0abcda704b3182f8c0d1265897d92d3712da624e05a2eb5ff8b0ba1dac16", size = 49232, upload-time = "2026-09-20T16:02:59.101Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4c/6f/a361c89256bb663342ad43e2e96c6966dbcf805605ea137fb356d4166b10/monarchmoneycommunity-1.7.1.tar.gz", hash = "sha256:6253d446ef9d0eb9d50b1951fc971b66b70ed59a9f4bca7519cd39633dac04ca", size = 75832, upload-time = "2026-10-31T18:51:00.168Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/05/31/9e76872f77e082c910558348e6d73c986f8734f23b383c53cb0f5418eac2/monarchmoneycommunity-1.6.0-py3-none-any.whl", hash = "sha256:30348847a72378453a65dad0e504a77defec99812832d7bd4f693363915c29b3", size = 33390, upload-time = "2026-09-20T16:02:57.807Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/31/2339c6b81ee3873039f0ee07ddab09df184dd5f4fca6decde94e51830094/monarchmoneycommunity-1.7.1-py3-none-any.whl", hash = "sha256:107313a403725fc9986dd4715ef560b3187156674b91e1d38d3966ef8223269e", size = 52425, upload-time = "2026-10-31T18:50:58.572Z" },
 ]
 
 [[package]]
@@ -1703,6 +1694,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/48/bb/3d8757f21e9a53d9035c9eb039a777047139a16bfdbedfc7a58241c3d914/starlette-1.10.0.tar.gz", hash = "sha256:b8399098d4c1e3522734f7235dc79b1fc967f96cf139c81e0fa30479e0685f9b", size = 2734356, upload-time = "2026-10-24T15:04:12.342Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/2e/947cfe02def9371c07cd5bf5b6b61c829e9aecb9904db02a66cfafbc1eec/starlette-1.10.0-py3-none-any.whl", hash = "sha256:478c0ab3b4ced6e82719849c118fa406f0278a3499c1a898cd15cd31bdc38ce4", size = 80571, upload-time = "2026-10-24T15:04:10.371Z" },
+]
+
+[[package]]
+name = "tenacity"
+version = "9.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/9e/497c1c8ebe5a5b5d1d4a7511aea22c0bb1a97e3170d98abdef0e1b34265a/tenacity-9.2.1.tar.gz", hash = "sha256:a606b5c808d0cded4a359d5b9932d867ff2a6a6b64d37350260fd01bbdf83839", size = 58261, upload-time = "2026-10-07T12:13:01.633Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d6/26/1ff2b0721ac66a3ec5b1402b333110b352ab0a8724052ac279a7b82d40c4/tenacity-9.2.1-py3-none-any.whl", hash = "sha256:9e56f17539296baab7beabb08b92f6ee3d7be92d8be72d763360677c2ad6580e", size = 32310, upload-time = "2026-10-07T12:13:00.102Z" },
 ]
 
 [[package]]

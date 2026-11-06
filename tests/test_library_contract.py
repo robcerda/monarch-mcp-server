@@ -38,3 +38,29 @@ def test_installed_library_supports_transaction_ownership():
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_installed_library_supports_merging_merchants():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(
+                """
+                import inspect
+                from monarchmoney import MonarchMoney
+
+                delete = getattr(MonarchMoney, "delete_merchant", None)
+                assert inspect.iscoroutinefunction(delete), (
+                    "Installed monarchmoneycommunity lacks delete_merchant; "
+                    "update the dependency and both lockfiles to a release containing PR #83"
+                )
+                inspect.signature(delete).bind(None, "1", move_to_merchant_id="2")
+            """
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

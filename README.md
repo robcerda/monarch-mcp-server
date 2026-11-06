@@ -481,6 +481,7 @@ tool does not enable it or refresh institutions.
 ### 🔄 Merchant & Recurring Stream Management
 - **Get Merchant**: View a merchant's details including recurring transaction stream configuration
 - **Update Merchant**: Modify a merchant's name and/or recurring stream settings (frequency, amount, base date)
+- **Merge Merchants**: Move one merchant's transactions to another and delete the source, which cannot be undone
 - **Review Recurring Stream**: Accept, ignore, or reset recurring transaction streams detected by Monarch
 
 ### ✂️ Transaction Splits
@@ -561,6 +562,7 @@ live tool registry and the functions' signatures, so it does not drift.
 | `get_transactions_needing_review` | Get transactions that need review based on various criteria | `needs_review`?, `days`?, `uncategorized_only`?, `without_notes_only`?, `limit`?, `offset`?, `account_id`?, `include_hidden`? |
 | `get_transactions_summary` | Get a high-level summary of transactions | None |
 | `mark_transaction_reviewed` | Mark a transaction as reviewed (clears the needs_review flag) | `transaction_id` |
+| `merge_merchants` | Merge one merchant into another, deleting the source | `source_merchant_id`, `target_merchant_id` |
 | `monarch_login` | Sign in via a secure form in the client UI | None |
 | `monarch_login_with_token` | Sign in with a browser copied session token | None |
 | `monarch_logout` | Clear the stored session and drop the cached client | None |
@@ -786,7 +788,7 @@ tool that is not there.
 }
 ```
 
-This leaves 35 of the 67 tools available, covering everything that reads.
+This leaves 35 of the 68 tools available, covering everything that reads.
 Read only is off by default outside Docker, so existing setups are unaffected;
 the Docker image turns it on (see [Start the HTTP server](#start-the-http-server)). Note that it
 also removes the login and logout tools, since those change durable state, so
@@ -808,7 +810,7 @@ These tools mutate your Monarch data. The list is every registered tool that wri
 
 **Goals**: `update_savings_goal`, `set_goal_contribution`
 
-**Merchants**: `update_merchant`, `review_recurring_stream`
+**Merchants**: `update_merchant`, `merge_merchants`, `review_recurring_stream`
 
 **Session**: `monarch_login`, `monarch_login_with_token`, `monarch_logout`
 

@@ -106,6 +106,7 @@ from monarch_mcp_server.tools.goals import (  # noqa: F401
 from monarch_mcp_server.tools.merchants import (  # noqa: F401
     get_merchant,
     update_merchant,
+    merge_merchants,
     review_recurring_stream,
 )
 from monarch_mcp_server.tools.business import (  # noqa: F401

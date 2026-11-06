@@ -308,6 +308,15 @@ HISTORY = [
 ]
 
 
+# Flows behind some of HISTORY's moves: (contributions, withdrawals, spending),
+# the latter two as positive amounts the way Monarch reports them.
+FLOWS = {
+    "2026-04-19": (20.0, 0.0, 0.0),
+    "2026-05-10": (0.0, 30.0, 0.0),
+    "2026-06-01": (0.0, 0.0, 5.0),
+}
+
+
 def _history_goal(goal_id="sg_1", name="Rainy Day Fund", current=120.0,
                   created=CREATED, **overrides):
     return _goal(id=goal_id, name=name, currentBalance=current,
@@ -322,15 +331,18 @@ def _period_key(d, granularity):
     return d
 
 
-def _history_client(goals, history_by_goal):
+def _history_client(goals, history_by_goal, flows_by_goal=None):
     """Serve the goal list and Monarch's history for each goal.
 
     history_by_goal maps a goal id to its true closing balances on days with
     events ([(date, balance)]), or to an Exception to raise. Like Monarch, a
     request with startDate returns the running change since that date, one
-    row per period with events, dated at the period's start.
+    row per period with events, dated at the period's start. flows_by_goal
+    optionally maps a goal id to {date: (contributions, withdrawals,
+    spending)}, which each row sums over its period.
     """
     created = {g["id"]: g.get("createdAt") for g in goals}
+    flows_by_goal = flows_by_goal or {}
 
     async def gql_call(operation, graphql_query, variables=None):
         if operation == "GetSavingsGoals":
@@ -348,11 +360,19 @@ def _history_client(goals, history_by_goal):
         before = [b for d, b in days if d < start]
         base = before[-1] if before else 0.0
         rows = {}
+        flows = {}
         for d, b in days:
             if d >= start:
-                rows[_period_key(d, period)] = b - base
+                key = _period_key(d, period)
+                rows[key] = b - base
+                day_flows = flows_by_goal.get(variables["id"], {}).get(
+                    d.isoformat(), (0.0, 0.0, 0.0))
+                flows[key] = [a + b for a, b in zip(flows.get(key, (0.0,) * 3),
+                                                    day_flows)]
         return {"savingsGoal": {"goalEventAggregation": {"dataByPeriod": [
-            {"date": d.isoformat(), "totalSavings": v}
+            {"date": d.isoformat(), "totalSavings": v,
+             "contributions": flows[d][0], "withdrawals": flows[d][1],
+             "spending": flows[d][2]}
             for d, v in sorted(rows.items())]}}}
 
     c = AsyncMock()
@@ -573,6 +593,161 @@ class TestSavingsGoalHistory:
         assert _balances(goal["series"]) == [("2026-06-15", 50.0)]
         assert goal["start_balance"] == 50.0 and goal["change"] == 0.0
         assert _history_requests(c) == []
+
+    # -- breakdown ------------------------------------------------------------
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_breakdown_is_off_by_default(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal()], {"sg_1": HISTORY}, {"sg_1": FLOWS})
+
+        data = json.loads(await get_savings_goal_history())
+
+        goal = data["goals"][0]
+        assert "breakdown" not in goal
+        assert all(set(row) == {"date", "balance"} for row in goal["series"])
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_monthly_breakdown(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal()], {"sg_1": HISTORY}, {"sg_1": FLOWS})
+
+        data = json.loads(await get_savings_goal_history(breakdown=True))
+
+        goal = data["goals"][0]
+        parts = [(r["date"], r["change"], r["contributions"], r["withdrawals"],
+                  r["spending"], r["adjustments"]) for r in goal["series"]]
+        assert parts == [
+            ("2026-04-01", 30.0, 20.0, 0.0, 0.0, 10.0),   # from the Apr 1 opening
+            ("2026-05-01", -40.0, 0.0, 30.0, 0.0, -10.0),
+            ("2026-06-01", 30.0, 0.0, 0.0, 5.0, 35.0),
+        ]
+        assert goal["breakdown"] == {"contributions": 20.0, "withdrawals": 30.0,
+                                     "spending": 5.0, "adjustments": 35.0}
+        b = goal["breakdown"]
+        assert goal["change"] == (b["contributions"] - b["withdrawals"]
+                                  - b["spending"] + b["adjustments"])
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_breakdown_after_first_month(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal()], {"sg_1": HISTORY}, {"sg_1": FLOWS})
+
+        data = json.loads(await get_savings_goal_history(periods=2, breakdown=True))
+
+        goal = data["goals"][0]
+        # May's change runs from April's close (130), not the Apr 1 opening.
+        assert goal["series"][0]["change"] == -40.0
+        assert goal["breakdown"] == {"contributions": 0.0, "withdrawals": 30.0,
+                                     "spending": 5.0, "adjustments": 25.0}
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_breakdown_month_without_events(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal()],
+            {"sg_1": [("2026-04-01", 100.0), ("2026-04-19", 130.0),
+                      ("2026-06-15", 120.0)]})
+
+        data = json.loads(await get_savings_goal_history(breakdown=True))
+
+        may = data["goals"][0]["series"][1]
+        assert may == {"date": "2026-05-01", "balance": 130.0, "change": 0.0,
+                       "contributions": 0.0, "withdrawals": 0.0, "spending": 0.0,
+                       "adjustments": 0.0}
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_annual_breakdown(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal(current=70.0, created="2025-12-20T00:00:00+00:00")],
+            {"sg_1": [("2025-12-20", 50.0), ("2025-12-28", 55.0),
+                      ("2026-03-01", 70.0)]},
+            {"sg_1": {"2025-12-28": (5.0, 0.0, 0.0),
+                      "2026-03-01": (10.0, 0.0, 0.0)}})
+
+        data = json.loads(await get_savings_goal_history(
+            granularity="annual", breakdown=True))
+
+        goal = data["goals"][0]
+        assert [(r["date"], r["change"], r["contributions"], r["adjustments"])
+                for r in goal["series"]] == [
+            ("2025-01-01", 5.0, 5.0, 0.0), ("2026-01-01", 15.0, 10.0, 5.0)]
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_breakdown_total_with_a_new_goal(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal(),
+             _history_goal("sg_2", "Vacation", 40.0,
+                           created="2026-05-01T00:00:00+00:00")],
+            {"sg_1": HISTORY,
+             "sg_2": [("2026-05-01", 30.0), ("2026-06-15", 40.0)]},
+            {"sg_1": FLOWS, "sg_2": {"2026-06-15": (10.0, 0.0, 0.0)}})
+
+        data = json.loads(await get_savings_goal_history(breakdown=True))
+
+        total = data["total"]
+        rows = [(r["date"], r["balance"], r["change"], r["new_goals"],
+                 r["contributions"], r["adjustments"]) for r in total["series"]]
+        assert rows == [
+            ("2026-04-01", 130.0, 30.0, 0.0, 20.0, 10.0),
+            # The new goal's starting balance shows up as new_goals.
+            ("2026-05-01", 120.0, -10.0, 30.0, 0.0, -10.0),
+            ("2026-06-01", 160.0, 40.0, 0.0, 10.0, 35.0),
+        ]
+        assert total["breakdown"] == {"new_goals": 30.0, "contributions": 30.0,
+                                      "withdrawals": 30.0, "spending": 5.0,
+                                      "adjustments": 35.0}
+        b = total["breakdown"]
+        assert total["change"] == (b["new_goals"] + b["contributions"]
+                                   - b["withdrawals"] - b["spending"]
+                                   + b["adjustments"])
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_day_breakdown(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal()], {"sg_1": HISTORY}, {"sg_1": FLOWS})
+
+        data = json.loads(await get_savings_goal_history(
+            granularity="day", breakdown=True))
+
+        goal = data["goals"][0]
+        parts = [(r["date"], r["change"], r["contributions"], r["withdrawals"],
+                  r["spending"], r["adjustments"]) for r in goal["series"]]
+        assert parts == [
+            ("2026-04-01", 0.0, 0.0, 0.0, 0.0, 0.0),     # the opening balance
+            ("2026-04-02", 10.0, 0.0, 0.0, 0.0, 10.0),
+            ("2026-04-04", -5.0, 0.0, 0.0, 0.0, -5.0),
+            ("2026-04-19", 25.0, 20.0, 0.0, 0.0, 5.0),
+            ("2026-05-03", -5.0, 0.0, 0.0, 0.0, -5.0),
+            ("2026-05-10", -35.0, 0.0, 30.0, 0.0, -5.0),
+            ("2026-06-01", 5.0, 0.0, 0.0, 5.0, 10.0),
+            ("2026-06-15", 25.0, 0.0, 0.0, 0.0, 25.0),
+        ]
+        # Same window, same totals as the monthly breakdown.
+        assert goal["breakdown"] == {"contributions": 20.0, "withdrawals": 30.0,
+                                     "spending": 5.0, "adjustments": 35.0}
+
+    @patch('monarch_mcp_server.tools.goals.get_monarch_client')
+    async def test_day_breakdown_total_with_a_new_goal(self, mock_get_client):
+        mock_get_client.return_value = _history_client(
+            [_history_goal(),
+             _history_goal("sg_2", "Vacation", 40.0,
+                           created="2026-05-01T00:00:00+00:00")],
+            {"sg_1": HISTORY,
+             "sg_2": [("2026-05-01", 30.0), ("2026-06-15", 40.0)]},
+            {"sg_1": FLOWS, "sg_2": {"2026-06-15": (10.0, 0.0, 0.0)}})
+
+        data = json.loads(await get_savings_goal_history(
+            granularity="day", breakdown=True))
+
+        total = data["total"]
+        may_1 = next(r for r in total["series"] if r["date"] == "2026-05-01")
+        assert (may_1["balance"], may_1["change"], may_1["new_goals"]) == (
+            160.0, 30.0, 30.0)
+        b = total["breakdown"]
+        assert b["new_goals"] == 30.0
+        assert total["change"] == (b["new_goals"] + b["contributions"]
+                                   - b["withdrawals"] - b["spending"]
+                                   + b["adjustments"])
 
     # -- shared behaviour -----------------------------------------------------
 

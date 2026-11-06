@@ -400,6 +400,9 @@ async def set_goal_contribution(
 # the running change in the goal's balance since that date (not the balance),
 # one row per period with goal events, dated at the period's start. Monarch has
 # no history before the household moved to the current goals system.
+#
+# Rows also carry the period's contributions, withdrawals and spending, for the
+# breakdown. Withdrawals and spending come as positive amounts.
 _GOAL_HISTORY_TEMPLATE = """
 query GetSavingsGoalHistory($id: ID!, $today: Date!, $startDate: Date!) {
   savingsGoal(id: $id) {
@@ -414,6 +417,9 @@ query GetSavingsGoalHistory($id: ID!, $today: Date!, $startDate: Date!) {
       dataByPeriod {
         date
         totalSavings
+        contributions
+        withdrawals
+        spending
         __typename
       }
       __typename
@@ -422,6 +428,9 @@ query GetSavingsGoalHistory($id: ID!, $today: Date!, $startDate: Date!) {
   }
 }
 """
+
+FLOW_FIELDS = ("contributions", "withdrawals", "spending")
+BREAKDOWN_FIELDS = FLOW_FIELDS + ("adjustments",)
 
 # The grouping periods Monarch's goal aggregation supports. `groupingPeriod` is
 # an enum whose type name the API does not expose, so it cannot be a variable:
@@ -439,8 +448,9 @@ MAX_HISTORY_DAYS = 92
 # Parallel history requests; enough to be quick without hammering the API.
 _HISTORY_CONCURRENCY = 5
 
-# (opening date, opening balance, [(period start, balance after that period)])
-_History = Tuple[date, float, List[Tuple[date, float]]]
+# (opening date, opening balance, [(period start, balance after that period)],
+#  {period start: (contributions, withdrawals, spending)})
+_History = Tuple[date, float, List[Tuple[date, float]], Dict[date, Tuple[float, ...]]]
 
 
 def _today() -> date:
@@ -454,10 +464,12 @@ def _created_day(goal: Dict[str, Any]) -> Optional[date]:
 
 
 def _period_start(d: date, granularity: str) -> date:
-    """Start of the month or year containing `d`."""
+    """Start of the day, month or year containing `d`."""
     if granularity == "monthly":
         return d.replace(day=1)
-    return d.replace(month=1, day=1)
+    if granularity == "annual":
+        return d.replace(month=1, day=1)
+    return d
 
 
 def _next_period(start: date, granularity: str) -> date:
@@ -479,7 +491,7 @@ def _periods_back(today: date, granularity: str, periods: int) -> date:
 
 def _balance_on(history: _History, d: date) -> Optional[float]:
     """Balance at the close of `d`, or None before the goal's opening."""
-    opening_date, opening, points = history
+    opening_date, opening, points, _ = history
     if d < opening_date:
         return None
     i = bisect_right(points, (d, float("inf"))) - 1
@@ -507,7 +519,7 @@ async def _goal_history(
     """
     created = _created_day(goal)
     fetch_from = max(start, created + timedelta(days=1)) if created else start
-    rows: List[Tuple[date, float]] = []
+    rows: List[Tuple[date, float, Tuple[float, ...]]] = []
     if fetch_from <= today:
         result = await client.gql_call(
             operation="GetSavingsGoalHistory",
@@ -521,14 +533,48 @@ async def _goal_history(
         goal_data = result.get("savingsGoal") or {}
         aggregation = goal_data.get("goalEventAggregation") or {}
         rows = sorted(
-            (date.fromisoformat(row["date"][:10]), row["totalSavings"])
+            (
+                date.fromisoformat(row["date"][:10]),
+                row["totalSavings"],
+                tuple(row.get(f) or 0.0 for f in FLOW_FIELDS),
+            )
             for row in aggregation.get("dataByPeriod") or []
             if row.get("date") and row.get("totalSavings") is not None
         )
 
     opening = (goal.get("currentBalance") or 0.0) - (rows[-1][1] if rows else 0.0)
-    points = [(d, opening + change) for d, change in rows]
-    return fetch_from - timedelta(days=1), opening, points
+    points = [(d, opening + change) for d, change, _ in rows]
+    flows = {d: f for d, _, f in rows}
+    return fetch_from - timedelta(days=1), opening, points, flows
+
+
+def _add_breakdown(
+    rows: List[Dict[str, Any]], opening: float, flows: Dict[date, Tuple[float, ...]]
+) -> Dict[str, float]:
+    """Split each period row's change; return the totals for the window.
+
+    change = contributions - withdrawals - spending + adjustments, where
+    adjustments is whatever the recorded flows do not explain.
+    """
+    totals = dict.fromkeys(BREAKDOWN_FIELDS, 0.0)
+    previous = opening
+    for row in rows:
+        contributions, withdrawals, spending = flows.get(
+            date.fromisoformat(row["date"]), (0.0, 0.0, 0.0)
+        )
+        change = row["balance"] - previous
+        previous = row["balance"]
+        parts = {
+            "contributions": contributions,
+            "withdrawals": withdrawals,
+            "spending": spending,
+            "adjustments": change - contributions + withdrawals + spending,
+        }
+        row["change"] = round(change, 2)
+        for field, amount in parts.items():
+            row[field] = round(amount, 2)
+            totals[field] += amount
+    return {field: round(amount, 2) for field, amount in totals.items()}
 
 
 @mcp.tool()
@@ -536,6 +582,7 @@ async def get_savings_goal_history(
     goal_name: Optional[str] = None,
     granularity: str = "monthly",
     periods: Optional[int] = None,
+    breakdown: bool = False,
 ) -> str:
     """
     Show how savings goal balances have changed, up to today.
@@ -551,6 +598,14 @@ async def get_savings_goal_history(
         periods: How many days, months, or years to show, ending with today's.
             Defaults: 92 days (also the most for "day"), 60 months, or every
             year of history.
+        breakdown: Split each period's change into contributions, withdrawals,
+            spending and adjustments, so that
+            change = contributions - withdrawals - spending + adjustments.
+            Withdrawals and spending are positive amounts. Adjustments, as
+            Monarch calls them, are everything else: mostly market movement,
+            but also any transfer not recorded as a contribution or withdrawal.
+            They can lag a flow by a few days, so one may land in a later
+            period; by day this is common.
 
     Returns:
         Per goal: the balance at the start of the window (`start_balance`, as of
@@ -559,6 +614,11 @@ async def get_savings_goal_history(
         "annual" there is a row per period, dated at its start, with the balance
         at its end (today, for the current one). With several goals, a combined
         `total` too, which counts a goal as zero before it was created.
+
+        With breakdown, each series row also has the period's `change` and its
+        parts, and each goal and the total have a `breakdown` of the window. The
+        total's `new_goals` is the starting balance of goals created during the
+        window, which is part of its change but of no goal's.
     """
     try:
         if granularity not in HISTORY_GRANULARITIES:
@@ -643,16 +703,20 @@ async def get_savings_goal_history(
                     out.append({"date": label.isoformat(), "balance": round(total, 2)})
             return out
 
-        goal_results = [
-            {
+        goal_results = []
+        for goal, history in zip(goals, histories):
+            result_row = {
                 "goal_id": goal.get("id"),
                 "name": goal.get("name"),
                 **_change(history[1], goal.get("currentBalance") or 0.0),
                 "start_balance_date": history[0].isoformat(),
                 "series": series([history]),
             }
-            for goal, history in zip(goals, histories)
-        ]
+            if breakdown:
+                result_row["breakdown"] = _add_breakdown(
+                    result_row["series"], history[1], history[3]
+                )
+            goal_results.append(result_row)
 
         total = None
         if len(goals) > 1:
@@ -664,6 +728,25 @@ async def get_savings_goal_history(
                 ),
                 "series": series(histories),
             }
+            if breakdown:
+                fields = ("change", "new_goals") + BREAKDOWN_FIELDS
+                rows = {r["date"]: r for r in total["series"]}
+                sums = {r["date"]: dict.fromkeys(fields, 0.0) for r in total["series"]}
+                for goal_row in goal_results:
+                    for r in goal_row["series"]:
+                        for field in ("change",) + BREAKDOWN_FIELDS:
+                            sums[r["date"]][field] += r[field]
+                for h in histories:
+                    if h[0] > start:  # created during the window
+                        period = _period_start(h[0], granularity).isoformat()
+                        sums[period]["new_goals"] += h[1]
+                        sums[period]["change"] += h[1]
+                for day, parts in sums.items():
+                    rows[day].update({f: round(v, 2) for f, v in parts.items()})
+                total["breakdown"] = {
+                    f: round(sum(parts[f] for parts in sums.values()), 2)
+                    for f in ("new_goals",) + BREAKDOWN_FIELDS
+                }
 
         return json_success({
             "start_date": start.isoformat(),

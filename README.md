@@ -364,6 +364,12 @@ Connect an MCP client using Streamable HTTP to `http://127.0.0.1:8000/mcp`.
 | Additional allowed browser Origins | `--allowed-origin` (repeatable) | `MONARCH_MCP_ALLOWED_ORIGINS` (comma-separated) | None; HTTP loopback origins are always allowed |
 
 CLI flags override their environment settings.
+
+A Host given without a port also allows that host with any port, so
+`--allowed-host mcp.example.com` accepts both `mcp.example.com` and
+`mcp.example.com:8443`. Give a host with a port, such as
+`--allowed-host mcp.example.com:8443`, to allow only that port. Values are
+matched lowercased, with a trailing dot ignored.
 Host entries include the port when clients send one; `server.lan:*` allows any port.
 Origin entries include the scheme, for example `https://client.example.com`.
 Clients without an Origin header are supported.

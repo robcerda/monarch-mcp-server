@@ -69,6 +69,60 @@ def _port(value: str) -> int:
     return port
 
 
+def _split_host_port(value: str) -> tuple[str, str | None]:
+    """Split a Host value into host and port, honouring IPv6 brackets."""
+    if value.startswith("["):
+        closing = value.find("]")
+        if closing == -1:
+            return value, None
+        host, rest = value[: closing + 1], value[closing + 1 :]
+        if rest.startswith(":"):
+            return host, rest[1:]
+        return host, None
+    host, separator, port = value.rpartition(":")
+    if not separator:
+        return value, None
+    return host, port
+
+
+def _allowed_host_forms(value: str) -> list[str]:
+    """Expand one operator supplied Host value into allowlist entries.
+
+    Upstream matches these with a case sensitive prefix test, which refuses
+    hosts that are the same host written differently (see #156). Three
+    normalisations here, none of which widen what is accepted to a different
+    machine:
+
+    - lowercased, since Host is case insensitive
+    - a single trailing dot stripped, since the FQDN root form is the same host
+    - a value given without a port also gets the ":*" form, so an operator who
+      allows mcp.example.com accepts mcp.example.com:8443, the way the
+      loopback defaults already accept a port
+
+    A value that already carries a port is passed through unchanged, so an
+    operator can still pin one exactly.
+    """
+    host, port = _split_host_port(value.strip())
+    host = host.lower()
+    if host.endswith(".") and not host.endswith(".."):
+        host = host[:-1]
+    if not host:
+        return []
+    if port is not None:
+        return [f"{host}:{port}"]
+    return [host, f"{host}:*"]
+
+
+def _expand_allowed_hosts(values: list[str]) -> list[str]:
+    """Flatten the operator supplied hosts, keeping order and dropping dupes."""
+    out: list[str] = []
+    for value in values:
+        for form in _allowed_host_forms(value):
+            if form not in out:
+                out.append(form)
+    return out
+
+
 def _env_list(name: str) -> list[str]:
     return [
         value.strip() for value in os.environ.get(name, "").split(",") if value.strip()
@@ -130,7 +184,7 @@ def main(argv: list[str] | None = None) -> None:
                 "127.0.0.1:*",
                 "[::1]",
                 "[::1]:*",
-                *(
+                *_expand_allowed_hosts(
                     args.allowed_host
                     if args.allowed_host is not None
                     else _env_list("MONARCH_MCP_ALLOWED_HOSTS")

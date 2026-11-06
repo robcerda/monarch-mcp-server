@@ -236,6 +236,58 @@ def live_sessions():
     return None
 
 
+class TestOperatorSuppliedHostsAreNormalised:
+    """#156: upstream matches allowlist entries with a case sensitive prefix
+    test, so an operator who allowed mcp.example.com got a 421 for
+    mcp.example.com:8443, while the loopback defaults accepted a port because
+    they ship an explicit ":*" entry. The allowlist is ours, so it carries the
+    normalisation. Incoming Host headers are still matched by upstream, which
+    is why a trailing dot on the request is not covered here.
+    """
+
+    @pytest.mark.parametrize(
+        "given, expected",
+        [
+            ("mcp.example.com", ["mcp.example.com", "mcp.example.com:*"]),
+            ("MCP.Example.COM", ["mcp.example.com", "mcp.example.com:*"]),
+            ("mcp.example.com.", ["mcp.example.com", "mcp.example.com:*"]),
+            ("mcp.example.com:8443", ["mcp.example.com:8443"]),
+            ("[::1]", ["[::1]", "[::1]:*"]),
+            ("[fe80::1]:8000", ["[fe80::1]:8000"]),
+            ("", []),
+        ],
+    )
+    def test_each_form_expands_as_expected(self, given, expected):
+        assert app._allowed_host_forms(given) == expected
+
+    def test_a_host_given_with_a_port_is_not_widened(self):
+        """An operator pinning one port must keep only that port."""
+        assert app._allowed_host_forms("server.lan:9000") == ["server.lan:9000"]
+        assert "server.lan:*" not in app._allowed_host_forms("server.lan:9000")
+
+    def test_duplicates_collapse_and_order_holds(self):
+        assert app._expand_allowed_hosts(
+            ["a.example", "A.Example", "b.example"]
+        ) == ["a.example", "a.example:*", "b.example", "b.example:*"]
+
+    def test_the_port_form_is_accepted_end_to_end(self, isolate_transport):
+        app.main(["--transport", "http", "--allowed-host", "MCP.Example.com"])
+        with TestClient(
+            build_http_app(isolate_transport), base_url="https://mcp.example.com"
+        ) as client:
+            for host in ("mcp.example.com", "mcp.example.com:8443"):
+                accepted = client.post(
+                    "/mcp", headers={**HEADERS, "Host": host}, json=INITIALIZE
+                )
+                assert accepted.status_code == 200, host
+            refused = client.post(
+                "/mcp",
+                headers={**HEADERS, "Host": "other.example.com"},
+                json=INITIALIZE,
+            )
+            assert refused.status_code in REJECTED_HOST
+
+
 class TestRejectedRequestsDoNotLeakSessions:
     """#153: the session manager used to register a transport before the Host
     check ran, so every rejected request leaked a session that was never

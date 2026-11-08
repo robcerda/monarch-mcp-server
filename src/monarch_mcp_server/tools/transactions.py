@@ -1183,12 +1183,11 @@ async def delete_transaction(transaction_id: str) -> str:
 GET_RECURRING_TRANSACTIONS_QUERY = gql(
     """
     query MCP_GetRecurringTransactionItems(
-      $startDate: Date!, $endDate: Date!, $includeLiabilities: Boolean,
-      $limit: Int, $offset: Int
+      $startDate: Date!, $endDate: Date!, $includeLiabilities: Boolean
     ) {
       recurringTransactionItems(
         startDate: $startDate, endDate: $endDate,
-        includeLiabilities: $includeLiabilities, limit: $limit, offset: $offset
+        includeLiabilities: $includeLiabilities
       ) {
         date
         amount
@@ -1222,13 +1221,6 @@ GET_RECURRING_TRANSACTIONS_QUERY = gql(
     """
 )
 
-# Page size used when the caller leaves `limit` unset and the tool reads the
-# whole range itself. The page cap stops a server that ignores `offset` from
-# looping forever; hitting it is reported as truncated rather than hidden.
-RECURRING_PAGE_SIZE = 100
-RECURRING_MAX_PAGES = 50
-
-
 @mcp.tool()
 async def get_recurring_transactions(
     start_date: Optional[str] = None,
@@ -1251,13 +1243,10 @@ async def get_recurring_transactions(
         end_date: YYYY-MM-DD; defaults to current month end when both are omitted.
         include_liabilities: Include synced liability bills (default True).
             False requests merchant-only recurring items.
-        limit: Positive page size. Omit it to get every item in the range;
-            the tool pages through them itself.
+        limit: Positive page size. Omit it to get every item in the range.
         offset: Non-negative number of items to skip (default 0).
         include_metadata: False keeps the legacy list. True returns an envelope
-            with data, count, args, total_count (null), and truncated. With an
-            explicit limit, a full page is conservatively marked truncated
-            because no total is provided.
+            with data, count, args, total_count, and truncated.
 
     Returns:
         Recurring items with legacy merchant fields, account/category/merchant
@@ -1295,40 +1284,20 @@ async def get_recurring_transactions(
 
         client = await get_monarch_client()
 
-        async def fetch_page(page_limit: int, page_offset: int) -> List[Any]:
-            result = await client.gql_call(
-                operation="MCP_GetRecurringTransactionItems",
-                graphql_query=GET_RECURRING_TRANSACTIONS_QUERY,
-                variables={
-                    "startDate": start_date,
-                    "endDate": end_date,
-                    "includeLiabilities": include_liabilities,
-                    "limit": page_limit,
-                    "offset": page_offset,
-                },
-            )
-            return result.get("recurringTransactionItems") or []
-
-        # An omitted limit means the whole range. The default list carries no
-        # truncation flag, so a single capped page there would read to a caller
-        # as the complete month when it was not.
-        hit_page_cap = False
-        if limit is not None:
-            raw_items = await fetch_page(limit, offset)
-        else:
-            raw_items = []
-            for _ in range(RECURRING_MAX_PAGES):
-                page = await fetch_page(RECURRING_PAGE_SIZE, offset + len(raw_items))
-                raw_items.extend(page)
-                if len(page) < RECURRING_PAGE_SIZE:
-                    break
-            else:
-                hit_page_cap = True
-                logger.warning(
-                    "get_recurring_transactions stopped at %d pages; "
-                    "results may be incomplete",
-                    RECURRING_MAX_PAGES,
-                )
+        # Monarch ignores limit and offset on this field and always sends the
+        # whole range, so they are applied here instead.
+        result = await client.gql_call(
+            operation="MCP_GetRecurringTransactionItems",
+            graphql_query=GET_RECURRING_TRANSACTIONS_QUERY,
+            variables={
+                "startDate": start_date,
+                "endDate": end_date,
+                "includeLiabilities": include_liabilities,
+            },
+        )
+        all_items = result.get("recurringTransactionItems") or []
+        stop = None if limit is None else offset + limit
+        raw_items = all_items[offset:stop]
 
         recurring_list = []
         for item in raw_items:
@@ -1412,9 +1381,8 @@ async def get_recurring_transactions(
                     "offset": offset,
                 },
                 recurring_list,
+                total_count=len(all_items),
             )
-            if hit_page_cap:
-                envelope["truncated"] = True
             return json_success(envelope)
         return json_success(recurring_list)
     except Exception as e:

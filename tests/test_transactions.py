@@ -1468,6 +1468,22 @@ class TestBulkUpdateTransactions:
         updates = mock_monarch_client.gql_call.call_args.kwargs["variables"]["updates"]
         assert updates == {"reviewStatus": "needs_review"}
 
+    async def test_hide_from_reports_is_sent_as_hide(self, mock_monarch_client):
+        """hideFromReports is rejected by TransactionUpdateParams; hide is the field."""
+        mock_monarch_client.gql_call.return_value = self._ok(2)
+
+        await bulk_update_transactions(
+            transaction_ids=["txn_1", "txn_2"], hide_from_reports=True
+        )
+        updates = mock_monarch_client.gql_call.call_args.kwargs["variables"]["updates"]
+        assert updates == {"hide": True}
+
+        await bulk_update_transactions(
+            transaction_ids=["txn_1", "txn_2"], hide_from_reports=False
+        )
+        updates = mock_monarch_client.gql_call.call_args.kwargs["variables"]["updates"]
+        assert updates == {"hide": False}
+
     async def test_all_selected_is_never_true(self, mock_monarch_client):
         """True updates everything matching filters, not the listed ids."""
         mock_monarch_client.gql_call.return_value = self._ok(2)

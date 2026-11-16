@@ -526,7 +526,7 @@ live tool registry and the functions' signatures, so it does not drift.
 |------|-------------|------------|
 | `add_transaction_tag` | Add a tag to a transaction, preserving any tags already on it | `transaction_id`, `tag_id` |
 | `bulk_categorize_transactions` | Apply the same category to multiple transactions at once | `transaction_ids`, `category_id`, `mark_reviewed`?, `dry_run`? |
-| `bulk_update_transactions` | Apply the same edit to many transactions in one request | `transaction_ids`, `category_id`?, `merchant_name`?, `notes`?, `goal_id`?, `needs_review`?, `business_entity_id`?, `dry_run`? |
+| `bulk_update_transactions` | Apply the same edit to many transactions in one request | `transaction_ids`, `category_id`?, `merchant_name`?, `notes`?, `goal_id`?, `needs_review`?, `business_entity_id`?, `hide_from_reports`?, `dry_run`? |
 | `categorize_transaction` | Assign a category to a transaction | `transaction_id`, `category_id` |
 | `check_auth_status` | Report the stored session and its auth mode | None |
 | `create_transaction` | Create a new transaction in Monarch Money | `date`, `account_id`, `amount`, `merchant_name`, `category_id`, `notes`?, `update_balance`? |

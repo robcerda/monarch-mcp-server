@@ -944,6 +944,7 @@ async def bulk_update_transactions(
     goal_id: Optional[str] = None,
     needs_review: Optional[bool] = None,
     business_entity_id: Optional[str] = None,
+    hide_from_reports: Optional[bool] = None,
     dry_run: bool = False,
 ) -> str:
     """
@@ -964,8 +965,7 @@ async def bulk_update_transactions(
     per transaction and does report per item, which is the reason to reach for
     it instead when that matters.
 
-    `amount` and `hide_from_reports` are not offered: the bulk endpoint rejects
-    both. `date` it would accept, but overwriting dates across a set is rarely
+    `amount` is not offered: the bulk endpoint rejects it. `date` it would accept, but overwriting dates across a set is rarely
     meant and cannot be undone without the original values.
 
     Args:
@@ -977,6 +977,8 @@ async def bulk_update_transactions(
         needs_review: True to flag them as needing review, False to clear it
         business_entity_id: Business to assign (from get_business_entities),
             or "none" to clear it. Requires Monarch's business feature.
+        hide_from_reports: True to hide them from reports and budgets, False
+            to show them again
         dry_run: If True, report what would change without writing
 
     Returns:
@@ -997,8 +999,8 @@ async def bulk_update_transactions(
         # selection, where an unknown field fails validation before anything
         # can be written. `merchant`, `hideFromReports`, `needsReview` and
         # `amount` are all rejected: the merchant field is merchantName, the
-        # review flag is the reviewStatus enum, and hiding from reports has no
-        # bulk equivalent at all. Use update_transaction for that.
+        # review flag is the reviewStatus enum, and hiding from reports is
+        # `hide` (confirmed the same way, 2026-11-15; `isHidden` is rejected).
         updates: Dict[str, Any] = {}
         if category_id is not None:
             updates["categoryId"] = category_id
@@ -1010,6 +1012,8 @@ async def bulk_update_transactions(
             updates["goalId"] = goal_id
         if needs_review is not None:
             updates["reviewStatus"] = "needs_review" if needs_review else "reviewed"
+        if hide_from_reports is not None:
+            updates["hide"] = hide_from_reports
         if business_entity_id is not None:
             # businessEntityId confirmed against the live API (2026-09-24).
             updates["businessEntityId"] = (

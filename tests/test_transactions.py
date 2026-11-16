@@ -260,6 +260,8 @@ class TestMarkTransactionReviewed:
         call_kwargs = mock_client.update_transaction.call_args.kwargs
         assert call_kwargs["transaction_id"] == "txn_123"
         assert call_kwargs["needs_review"] is False
+        # Without it Monarch clears the flag but records no reviewer.
+        assert call_kwargs["reviewed"] is True
 
         data = json.loads(result)
         assert "updateTransaction" in data
@@ -300,6 +302,9 @@ class TestBulkCategorizeTransactions:
 
         # Verify update_transaction was called 3 times
         assert mock_client.update_transaction.call_count == 3
+        for c in mock_client.update_transaction.call_args_list:
+            assert c.kwargs["needs_review"] is False
+            assert c.kwargs["reviewed"] is True
 
     @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
     async def test_bulk_categorize_partial_failure(self, mock_get_client):
@@ -337,6 +342,7 @@ class TestBulkCategorizeTransactions:
 
         call_kwargs = mock_client.update_transaction.call_args.kwargs
         assert "needs_review" not in call_kwargs
+        assert "reviewed" not in call_kwargs
 
     @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
     async def test_bulk_categorize_empty_list(self, mock_get_client):
@@ -1125,8 +1131,16 @@ class TestUpdateTransaction:
             date="2026-04-01",
             hide_from_reports=True,
             needs_review=False,
+            reviewed=True,
             notes="All fields",
             owner_user_id="user-1",
+        )
+
+    async def test_flagging_for_review_does_not_send_reviewed(self, mock_monarch_client):
+        """reviewed=True records a reviewer; it belongs only to clearing the flag."""
+        await update_transaction("txn-1", needs_review=True)
+        mock_monarch_client.update_transaction.assert_called_once_with(
+            transaction_id="txn-1", needs_review=True
         )
 
     async def test_handles_api_error(self, mock_monarch_client):

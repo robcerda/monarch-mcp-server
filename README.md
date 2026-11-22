@@ -517,7 +517,7 @@ tool does not enable it or refresh institutions.
 
 ## 🛠️ Available Tools
 
-All 68 registered tools. Required parameters are listed first, optional ones
+All 70 registered tools. Required parameters are listed first, optional ones
 are marked with a trailing question mark. This table is generated from the
 live tool registry and the functions' signatures, so it does not drift.
 
@@ -577,6 +577,7 @@ live tool registry and the functions' signatures, so it does not drift.
 | `review_recurring_stream` | Set the review status of a recurring transaction stream | `stream_id`, `review_status` |
 | `search_transactions` | Search and filter transactions with comprehensive filtering options | `search`?, `limit`?, `offset`?, `start_date`?, `end_date`?, `category_ids`?, `account_ids`?, `tag_ids`?, `has_attachments`?, `has_notes`?, `hidden_from_reports`?, `is_split`?, `is_recurring`? |
 | `set_budget_amount` | Set or update a budget amount for a category or category group | `amount`, `category_id`?, `category_group_id`?, `start_date`?, `apply_to_future`? |
+| `set_flexible_budget` | Set the all-up Flexible bucket budget (Monarch's "fixed_and_flex" system) | `amount`, `start_date`?, `apply_to_future`? |
 | `set_business_entity` | Set (or clear) the business entity on one transaction | `transaction_id`, `business_entity_id` |
 | `set_goal_contribution` | Set the budgeted monthly contribution to a goal from one funding account | `goal_id`, `account_id`, `amount` |
 | `set_transaction_tags` | Set tags on a transaction | `transaction_id`, `tag_ids` |
@@ -584,6 +585,7 @@ live tool registry and the functions' signatures, so it does not drift.
 | `split_transaction` | Split a transaction into multiple parts with different categories/merchants | `transaction_id`, `splits` |
 | `update_account` | Update an account's name, balance, type or visibility settings | `account_id`, `name`?, `balance`?, `account_type`?, `account_sub_type`?, `include_in_net_worth`?, `hide_from_summary_list`?, `hide_transactions_from_reports`?, `dry_run`? |
 | `update_category` | Update an existing category's settings | `category_id`, `name`?, `icon`?, `group_id`?, `category_type`?, `exclude_from_budget`?, `budget_variability`?, `rollover_enabled`?, `rollover_start_month`?, `rollover_starting_balance`?, `rollover_frequency`?, `rollover_target_amount`?, `rollover_type`?, `confirm_rollover_reset`?, `dry_run`? |
+| `update_flex_rollover_settings` | Start a new Flex rollover period. Discards the accumulated rollover balance | `rollover_start_month`, `rollover_starting_balance`, `rollover_enabled`? |
 | `update_merchant` | Update a merchant's name and/or recurring transaction stream settings | `merchant_id`, `name`?, `is_recurring`?, `frequency`?, `base_date`?, `amount`?, `is_active`? |
 | `update_savings_goal` | Update a savings goal's target or monthly contribution | `goal_id`, `target_amount`?, `target_date`?, `name`?, `priority`?, `goal_type`?, `is_sinking_fund`? |
 | `update_transaction` | Update an existing transaction in Monarch Money | `transaction_id`, `category_id`?, `merchant_name`?, `goal_id`?, `amount`?, `date`?, `hide_from_reports`?, `needs_review`?, `notes`?, `owner_user_id`? |
@@ -609,6 +611,19 @@ Show me my last 50 transactions using get_transactions with limit 50
 ### Check Spending vs Budget
 ```
 Use get_budgets to show my current budget status
+```
+
+On Monarch's "fixed_and_flex" system, categories in the Flexible section share
+one pooled budget, so their rows in `get_budgets` carry no standalone amount.
+`get_budget_summary` returns that bucket as `flex`, with `status` `ok`,
+`not_configured` or `unsupported`; anything other than `ok` means no amount is
+available, not zero. It also returns `budget_system` and savings `goals` with
+planned and actual contributions. Goal contributions are separate from a
+category's `set_aside`, so do not add them together.
+
+### Set the Flexible Bucket Amount
+```
+Set my flexible budget to $1,500 for this month using set_flexible_budget
 ```
 
 ### Set a Budget Amount
@@ -811,13 +826,15 @@ These tools mutate your Monarch data. The list is every registered tool that wri
 
 **Rules**: `create_transaction_rule`, `update_transaction_rule`, `delete_transaction_rule`, `reorder_transaction_rule`
 
-**Categories and budgets**: `create_transaction_category`, `create_transaction_category_group`, `update_transaction_category_group`, `update_category`, `set_budget_amount`
+**Categories and budgets**: `create_transaction_category`, `create_transaction_category_group`, `update_transaction_category_group`, `update_category`, `set_budget_amount`, `set_flexible_budget`, `update_flex_rollover_settings`
 
 **Goals**: `update_savings_goal`, `set_goal_contribution`
 
 **Merchants**: `update_merchant`, `merge_merchants`, `review_recurring_stream`
 
 **Session**: `monarch_login`, `monarch_login_with_token`, `monarch_logout`
+
+`update_flex_rollover_settings` discards the Flexible bucket's accumulated rollover balance and starts a fresh period. Its two destructive arguments are required rather than defaulted, and it refuses to run unless the account reports the "fixed_and_flex" budget system, but approve it manually every time.
 
 `refresh_accounts` is side effecting too, since it posts a refresh request to your institutions, though it does not change your ledger.
 

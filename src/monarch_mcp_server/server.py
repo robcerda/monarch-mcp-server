@@ -84,6 +84,8 @@ from monarch_mcp_server.tools.budgets import (  # noqa: F401
     get_budgets,
     get_budget_summary,
     set_budget_amount,
+    set_flexible_budget,
+    update_flex_rollover_settings,
 )
 from monarch_mcp_server.tools.financial import (  # noqa: F401
     get_cashflow,

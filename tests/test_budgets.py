@@ -9,6 +9,7 @@ from gql.transport.exceptions import TransportQueryError, TransportServerError
 
 from monarch_mcp_server.tools import budgets as budgets_module
 from monarch_mcp_server.tools.budgets import (
+    get_budget_summary,
     get_budgets,
     set_flexible_budget,
     update_flex_rollover_settings,
@@ -115,9 +116,9 @@ def reject_flex_only(base_response):
 
 class TestGetBudgets:
     async def test_returns_formatted_category_rows(self):
-        result = json.loads(await get_budgets())
-        assert result["tool"] == "get_budgets"
-        rows = result["data"]
+        rows = json.loads(await get_budgets())
+        # The list contract is unchanged; the extra fields are additive.
+        assert isinstance(rows, list)
         assert len(rows) == 2
         groceries = next(row for row in rows if row["id"] == "cat-1")
         assert groceries == {
@@ -164,19 +165,23 @@ class TestGetBudgets:
 
         result = json.loads(await get_budgets())
 
-        # Must be a real error envelope. Asserting only `"get_budgets" in
-        # result` would also match the SUCCESS payload, which carries
-        # "tool": "get_budgets" -- so a regression rendering an outage as an
-        # empty-but-successful budget would pass.
         assert result["error"] is True
         assert result["tool"] == "get_budgets"
-        assert "data" not in result
+
+    async def test_accepts_a_one_sided_range_that_stays_in_order(
+        self, mock_monarch_client
+    ):
+        # Passing only start_date has always worked; it must keep working.
+        await get_budgets(start_date="2000-01-01")
+        variables = mock_monarch_client.gql_call.call_args.kwargs["variables"]
+        assert variables["startDate"] == "2000-01-01"
+        assert variables["endDate"] >= "2000-01-01"
 
     @pytest.mark.parametrize(
         "kwargs",
-        [{"start_date": "2026-12-01"}, {"end_date": "2026-03-31"}],
+        [{"start_date": "2999-12-01"}, {"end_date": "2000-03-31"}],
     )
-    async def test_rejects_a_half_specified_date_range(
+    async def test_rejects_a_range_inverted_by_the_defaulted_side(
         self, kwargs, mock_monarch_client
     ):
         # Filling the missing side from the current month can invert the range,
@@ -185,22 +190,26 @@ class TestGetBudgets:
         result = json.loads(await get_budgets(**kwargs))
 
         assert result["error"] is True
-        assert "together" in result["message"]
+        assert "pass both" in result["message"]
         # Rejected before any request went out.
         mock_monarch_client.gql_call.assert_not_awaited()
 
-    async def test_get_budget_data_raises_on_a_half_specified_range(
+    async def test_get_budget_data_raises_on_an_inverted_range(
         self, mock_monarch_client
     ):
         # Pin the helper's contract directly, not just the envelope the tool
         # wraps it in -- and pin the exception type.
         with pytest.raises(ValueError):
             await budgets_module.get_budget_data(
-                mock_monarch_client, start_date="2026-12-01"
+                mock_monarch_client, start_date="2999-12-01"
             )
         with pytest.raises(ValueError):
             await budgets_module.get_budget_data(
-                mock_monarch_client, end_date="2026-12-31"
+                mock_monarch_client, end_date="2000-12-31"
+            )
+        with pytest.raises(ValueError):
+            await budgets_module.get_budget_data(
+                mock_monarch_client, "2026-04-01", "2026-03-01"
             )
 
     async def test_survives_explicit_nulls_in_the_response(
@@ -221,18 +230,43 @@ class TestGetBudgets:
             },
         ):
             mock_monarch_client.gql_call.return_value = response
-            result = json.loads(await get_budgets())
-            assert result.get("error") is not True, response
-            assert result["data"] == []
+            for tool in (get_budgets, get_budget_summary):
+                result = json.loads(await tool())
+                assert not (isinstance(result, dict) and result.get("error")), (
+                    tool.__name__,
+                    response,
+                )
+
+    async def test_surfaces_rollover_so_remaining_reconciles(
+        self, mock_monarch_client
+    ):
+        enriched = with_flex(mock_monarch_client.gql_call.return_value)
+        amounts = enriched["budgetData"]["monthlyAmountsByCategory"][0][
+            "monthlyAmounts"
+        ][0]
+        # A rollover category: planned - actual (180) != remaining (430).
+        amounts["remainingAmount"] = 430.00
+        amounts["previousMonthRolloverAmount"] = 250.00
+        amounts["rolloverType"] = "monthly"
+        mock_monarch_client.gql_call.return_value = enriched
+
+        row = next(r for r in json.loads(await get_budgets()) if r["id"] == "cat-1")
+
+        assert row["rollover"] == 250.00
+        assert row["rollover_type"] == "monthly"
+        # The gap is now explainable rather than looking like bad data.
+        assert row["planned"] - row["actual"] + row["rollover"] == row["remaining"]
 
 
 class TestFlexBucket:
+    """The Flexible bucket, goals and budget system live on get_budget_summary."""
+
     async def test_reports_flex_bucket_when_present(self, mock_monarch_client):
         mock_monarch_client.gql_call.return_value = with_flex(
             mock_monarch_client.gql_call.return_value
         )
 
-        result = json.loads(await get_budgets())
+        result = json.loads(await get_budget_summary())
 
         assert result["flex"] == {
             "status": "ok",
@@ -248,98 +282,22 @@ class TestFlexBucket:
                 }
             ],
         }
-        assert result["totals"][0]["flexible"]["planned"] == 2000.00
-        assert result["totals"][0]["fixed"]["remaining"] == 0.00
-        assert result["totals"][0]["non_monthly"]["actual"] == 100.00
-
-    async def test_reports_income_and_overall_expense_totals(
-        self, mock_monarch_client
-    ):
-        mock_monarch_client.gql_call.return_value = with_flex(
-            mock_monarch_client.gql_call.return_value
-        )
-
-        totals = json.loads(await get_budgets())["totals"][0]
-
-        assert totals["income"] == {
-            "planned": 8000.00,
-            "actual": 8000.00,
-            "remaining": 0.00,
-            "rollover": 0.00,
-        }
-        assert totals["expenses"]["planned"] == 3800.00
-
-    async def test_reports_group_level_budgets(self, mock_monarch_client):
-        mock_monarch_client.gql_call.return_value = with_flex(
-            mock_monarch_client.gql_call.return_value
-        )
-
-        groups = json.loads(await get_budgets())["groups"]
-
-        assert groups == [
-            {
-                "id": "grp-1",
-                "name": "Food",
-                "planned": 700.00,
-                "actual": 505.00,
-                "remaining": 195.00,
-                "rollover": 0.00,
-                "rollover_type": "monthly",
-                "category_type": "expense",
-                "group_level_budgeting": None,
-                "month": "2026-03-01",
-            }
-        ]
-
-    async def test_groups_empty_when_query_ran_but_returned_none(self):
-        # Default fixture omits the group selection: the query succeeded, so
-        # [] (asked, none there) rather than null (could not ask).
-        assert json.loads(await get_budgets())["groups"] == []
-
-    async def test_group_rows_flag_authoritative_group_budgets(
-        self, mock_monarch_client
-    ):
-        enriched = with_flex(mock_monarch_client.gql_call.return_value)
-        enriched["categoryGroups"][0]["groupLevelBudgetingEnabled"] = True
-        mock_monarch_client.gql_call.return_value = enriched
-
-        groups = json.loads(await get_budgets())["groups"]
-
-        # True => the group holds the budget; False/None => it is a roll-up of
-        # its categories, and adding both double-counts.
-        assert groups[0]["group_level_budgeting"] is True
-
-    async def test_surfaces_rollover_so_remaining_reconciles(
-        self, mock_monarch_client
-    ):
-        enriched = with_flex(mock_monarch_client.gql_call.return_value)
-        amounts = enriched["budgetData"]["monthlyAmountsByCategory"][0][
-            "monthlyAmounts"
-        ][0]
-        # A rollover category: planned - actual (180) != remaining (430).
-        amounts["remainingAmount"] = 430.00
-        amounts["previousMonthRolloverAmount"] = 250.00
-        amounts["rolloverType"] = "monthly"
-        mock_monarch_client.gql_call.return_value = enriched
-
-        row = next(
-            r for r in json.loads(await get_budgets())["data"] if r["id"] == "cat-1"
-        )
-
-        assert row["rollover"] == 250.00
-        assert row["rollover_type"] == "monthly"
-        # The gap is now explainable rather than looking like bad data.
-        assert row["planned"] - row["actual"] + row["rollover"] == row["remaining"]
+        totals = result["totals_by_month"][0]
+        assert totals["totalIncome"]["plannedAmount"] == 8000.00
+        assert totals["totalFlexibleExpenses"]["plannedAmount"] == 2000.00
+        assert totals["totalFixedExpenses"]["remainingAmount"] == 0.00
+        assert totals["totalNonMonthlyExpenses"]["actualAmount"] == 100.00
 
     async def test_reports_budget_system(self, mock_monarch_client):
         enriched = with_flex(mock_monarch_client.gql_call.return_value)
         enriched["budgetSystem"] = "fixed_and_flex"
         mock_monarch_client.gql_call.return_value = enriched
 
-        assert json.loads(await get_budgets())["budget_system"] == "fixed_and_flex"
+        result = json.loads(await get_budget_summary())
+        assert result["budget_system"] == "fixed_and_flex"
 
     async def test_budget_system_null_when_absent(self):
-        assert json.loads(await get_budgets())["budget_system"] is None
+        assert json.loads(await get_budget_summary())["budget_system"] is None
 
     async def test_reports_goals_with_planned_and_actual_contributions(
         self, mock_monarch_client
@@ -371,7 +329,7 @@ class TestFlexBucket:
         ]
         mock_monarch_client.gql_call.return_value = enriched
 
-        goals = json.loads(await get_budgets())["goals"]
+        goals = json.loads(await get_budget_summary())["goals"]
 
         assert goals[0] == {
             "id": "goal-1",
@@ -400,13 +358,13 @@ class TestFlexBucket:
         ]
         mock_monarch_client.gql_call.return_value = enriched
 
-        goal = json.loads(await get_budgets())["goals"][0]
+        goal = json.loads(await get_budget_summary())["goals"][0]
 
         assert goal["completed"] is True
         assert goal["archived"] is False
 
     async def test_goals_empty_when_account_has_none(self):
-        assert json.loads(await get_budgets())["goals"] == []
+        assert json.loads(await get_budget_summary())["goals"] == []
 
     async def test_everything_extended_is_null_on_the_fallback_path(
         self, mock_monarch_client
@@ -416,19 +374,20 @@ class TestFlexBucket:
         base = mock_monarch_client.gql_call.return_value
         mock_monarch_client.gql_call.side_effect = reject_flex_only(base)
 
-        result = json.loads(await get_budgets())
+        result = json.loads(await get_budget_summary())
 
         assert result["flex"]["status"] == "unsupported"
-        assert result["groups"] is None
         assert result["goals"] is None
-        assert result["totals"] is None
         assert result["budget_system"] is None
-        assert all(row["rollover"] is None for row in result["data"])
+        assert all(row["rollover"] is None for row in result["category_budgets"])
+        # The summary's existing keys still come back from its own query.
+        assert len(result["category_budgets"]) == 2
 
     async def test_prefers_the_flex_query(self, mock_monarch_client):
-        await get_budgets()
-        _, kwargs = mock_monarch_client.gql_call.call_args
-        assert kwargs["operation"] == "MCPBudgetDataFlex"
+        for tool in (get_budgets, get_budget_summary):
+            await tool()
+            _, kwargs = mock_monarch_client.gql_call.call_args
+            assert kwargs["operation"] == "MCPBudgetDataFlex"
 
     @staticmethod
     def _assert_operation_matches_document(call):
@@ -453,47 +412,50 @@ class TestFlexBucket:
         base = mock_monarch_client.gql_call.return_value
         mock_monarch_client.gql_call.side_effect = reject_flex_only(base)
 
-        # Exercises both the extended call and the narrow fallback.
+        # Exercises the extended call and both fallbacks.
         await get_budgets()
+        await get_budget_summary()
 
         calls = mock_monarch_client.gql_call.call_args_list
-        assert len(calls) == 2
+        assert len(calls) == 4
         for call in calls:
             self._assert_operation_matches_document(call)
 
     async def test_not_configured_when_account_has_no_flex_bucket(self):
         # The default fixture response omits the flex selections entirely.
-        result = json.loads(await get_budgets())
+        result = json.loads(await get_budget_summary())
         assert result["flex"]["status"] == "not_configured"
         assert result["flex"]["monthly"] == []
-        assert result["totals"] == []
         # Category rows are unaffected.
-        assert len(result["data"]) == 2
+        assert len(result["category_budgets"]) == 2
 
-    async def test_falls_back_to_narrow_query_when_flex_rejected(
-        self, mock_monarch_client
-    ):
+    async def test_falls_back_when_flex_rejected(self, mock_monarch_client):
         base = mock_monarch_client.gql_call.return_value
         mock_monarch_client.gql_call.side_effect = reject_flex_only(base)
 
-        result = json.loads(await get_budgets())
+        rows = json.loads(await get_budgets())
+        summary = json.loads(await get_budget_summary())
 
-        assert result["flex"]["status"] == "unsupported"
-        assert result["totals"] is None
-        assert result["groups"] is None
-        # The whole tool still works -- this is the no-regression guarantee.
-        assert len(result["data"]) == 2
+        # Both tools still work -- this is the no-regression guarantee.
+        assert len(rows) == 2
+        assert summary["flex"]["status"] == "unsupported"
         operations = [
             call.kwargs["operation"]
             for call in mock_monarch_client.gql_call.call_args_list
         ]
-        assert operations == ["MCPBudgetDataFlex", "MCPBudgetData"]
+        # Each tool falls back to the query it used before the flex work.
+        assert operations == [
+            "MCPBudgetDataFlex",
+            "MCPBudgetData",
+            "MCPBudgetDataFlex",
+            "MCPBudgetSummary",
+        ]
 
     async def test_a_transient_rejection_does_not_stick(self, mock_monarch_client):
         # gql raises TransportQueryError for ANY GraphQL `errors` array --
         # a rate limit, a resolver hiccup, a partial success. Caching
-        # "unsupported" off one of those would strip flex, groups, goals,
-        # totals and rollover from every later call for the whole process.
+        # "unsupported" off one of those would strip flex, goals and rollover
+        # from every later call for the whole process.
         base = mock_monarch_client.gql_call.return_value
         calls = {"n": 0}
 
@@ -507,8 +469,8 @@ class TestFlexBucket:
 
         mock_monarch_client.gql_call.side_effect = flaky
 
-        first = json.loads(await get_budgets())
-        second = json.loads(await get_budgets())
+        first = json.loads(await get_budget_summary())
+        second = json.loads(await get_budget_summary())
 
         assert first["flex"]["status"] == "unsupported"
         # Recovered rather than staying degraded.

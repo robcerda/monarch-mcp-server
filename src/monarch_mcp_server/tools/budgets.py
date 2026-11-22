@@ -281,8 +281,11 @@ def _is_query_rejection(exc: Exception) -> bool:
     )
 
 
-# Kept separate so get_budgets retains its category-only request and response
-# contract. The summary exposes both overlapping views plus Monarch's totals.
+# get_budget_summary's fallback when Monarch refuses BUDGET_QUERY_FLEX. The
+# extended query selects a superset of this, so the summary's existing keys are
+# filled either way; only flex, goals and budget_system need the extended one.
+BUDGET_SUMMARY_OPERATION = "MCPBudgetSummary"
+
 BUDGET_SUMMARY_QUERY = gql(
     """
     query MCPBudgetSummary($startDate: Date!, $endDate: Date!) {
@@ -335,12 +338,14 @@ async def get_budget_data(
     client: MonarchMoney,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    fallback: Tuple[str, Any] = (BUDGET_QUERY_OPERATION, BUDGET_QUERY),
 ) -> Tuple[Dict[str, Any], bool]:
     """Fetch budget data, preferring the query that includes flex bucket totals.
 
     Returns ``(raw_response, used_flex_query)``. When Monarch rejects the
-    extended selections this falls back to :data:`BUDGET_QUERY`, so accounts
-    that do not support them behave exactly as they did before.
+    extended selections this falls back to ``fallback`` (an operation name and
+    its document, :data:`BUDGET_QUERY` by default), so accounts that do not
+    support them behave exactly as they did before.
 
     The result is deliberately **not** cached. An earlier version latched
     "unsupported" for the life of the process to save a round-trip, but gql
@@ -353,20 +358,21 @@ async def get_budget_data(
     per call on accounts that genuinely lack the fields; the cost of a sticky
     wrong answer is silently wrong financial output, so it is not a close call.
     """
-    if (start_date is None) != (end_date is None):
-        # Filling only one side from the current month can invert the range
-        # (start 2026-12-01, end 2026-08-31), which returns nothing and reads
-        # as "this account has no budget".
-        raise ValueError(
-            "start_date and end_date must be given together, or both omitted "
-            "to default to the current month."
-        )
-
     default_start, default_end = current_month_range()
     variables = {
         "startDate": start_date or default_start,
         "endDate": end_date or default_end,
     }
+    # Filling only one side from the current month can invert the range
+    # (start 2026-12-01, end 2026-08-31), which returns nothing and reads as
+    # "this account has no budget". A one-sided range that stays in order is
+    # still accepted, as it always has been.
+    if variables["startDate"] > variables["endDate"]:
+        raise ValueError(
+            f"start_date {variables['startDate']} is after end_date "
+            f"{variables['endDate']}; when only one is given the other "
+            "defaults to the current month, so pass both."
+        )
 
     try:
         data = await client.gql_call(
@@ -387,9 +393,10 @@ async def get_budget_data(
     # If this fails too the problem was never flex-specific (an expired session
     # refuses both queries), and it propagates rather than being reported as an
     # account that lacks flex budgeting.
+    fallback_operation, fallback_query = fallback
     data = await client.gql_call(
-        operation=BUDGET_QUERY_OPERATION,
-        graphql_query=BUDGET_QUERY,
+        operation=fallback_operation,
+        graphql_query=fallback_query,
         variables=variables,
     )
     return data, False
@@ -453,18 +460,6 @@ def format_budget_data(budget_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             )
 
     return budget_rows
-
-
-def _totals_entry(node: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Normalize one of Monarch's planned/actual/remaining total objects."""
-    if not node:
-        return None
-    return {
-        "planned": node.get("plannedAmount"),
-        "actual": node.get("actualAmount"),
-        "remaining": node.get("remainingAmount"),
-        "rollover": node.get("previousMonthRolloverAmount"),
-    }
 
 
 def format_flex_budget(
@@ -540,90 +535,6 @@ def format_flex_budget(
     return {"status": "ok", "budget_variability": variability, "monthly": monthly}
 
 
-def format_budget_totals(
-    budget_data: Dict[str, Any], used_flex_query: bool
-) -> Optional[List[Dict[str, Any]]]:
-    """Per-month totals.
-
-    ``None`` means "could not ask" (the fallback query ran); ``[]`` means the
-    query succeeded and there were none. Collapsing those together is the same
-    mistake ``flex.status`` exists to avoid.
-    """
-    if not used_flex_query:
-        return None
-
-    totals = (budget_data.get("budgetData") or {}).get("totalsByMonth") or []
-
-    return [
-        {
-            "month": total.get("month"),
-            "income": _totals_entry(total.get("totalIncome")),
-            "expenses": _totals_entry(total.get("totalExpenses")),
-            "flexible": _totals_entry(total.get("totalFlexibleExpenses")),
-            "fixed": _totals_entry(total.get("totalFixedExpenses")),
-            "non_monthly": _totals_entry(total.get("totalNonMonthlyExpenses")),
-        }
-        for total in totals
-        if total
-    ]
-
-
-def format_group_budgets(
-    budget_data: Dict[str, Any], used_flex_query: bool
-) -> Optional[List[Dict[str, Any]]]:
-    """One row per category group per month.
-
-    ``None`` means "could not ask"; ``[]`` means none were returned.
-
-    ``group_level_budgeting`` says which level holds the real budget: when True
-    the group does and its categories carry none; when False this row is merely
-    the roll-up of its categories. Adding ``groups[].planned`` to the matching
-    ``data[].planned`` double-counts either way.
-    """
-    if not used_flex_query:
-        return None
-
-    by_group = (budget_data.get("budgetData") or {}).get(
-        "monthlyAmountsByCategoryGroup"
-    ) or []
-
-    group_info: Dict[str, Dict[str, Any]] = {
-        group.get("id"): {
-            "name": group.get("name"),
-            "category_type": group.get("type"),
-            "group_level_budgeting": group.get("groupLevelBudgetingEnabled"),
-        }
-        for group in budget_data.get("categoryGroups") or []
-        if group and group.get("id")
-    }
-
-    rows: List[Dict[str, Any]] = []
-    for entry in by_group:
-        if not entry:
-            continue
-        group_id = (entry.get("categoryGroup") or {}).get("id")
-        info = group_info.get(group_id) or {}
-        for amount in entry.get("monthlyAmounts") or []:
-            if not amount:
-                continue
-            rows.append(
-                {
-                    "id": group_id,
-                    "name": info.get("name"),
-                    "planned": amount.get("plannedCashFlowAmount"),
-                    "actual": amount.get("actualAmount"),
-                    "remaining": amount.get("remainingAmount"),
-                    "rollover": amount.get("previousMonthRolloverAmount"),
-                    "rollover_type": amount.get("rolloverType"),
-                    "category_type": info.get("category_type"),
-                    "group_level_budgeting": info.get("group_level_budgeting"),
-                    "month": amount.get("month"),
-                }
-            )
-
-    return rows
-
-
 def format_goals(
     budget_data: Dict[str, Any], used_flex_query: bool
 ) -> Optional[List[Dict[str, Any]]]:
@@ -674,97 +585,36 @@ async def get_budgets(
     Get budget information from Monarch Money.
 
     Args:
-        start_date: Start month in YYYY-MM-DD format
-        end_date: End month in YYYY-MM-DD format
+        start_date: Start month in YYYY-MM-DD format (defaults to the current month)
+        end_date: End month in YYYY-MM-DD format (defaults to the current month)
 
-        Pass BOTH or NEITHER. Omitting both defaults to the current month;
-        supplying only one is an error rather than being filled in, because
-        completing the missing side from today can invert the range and return
-        an empty result that reads as "this account has no budget".
+        A range whose defaulted side lands before the given one (start in the
+        future, end omitted) is refused rather than returning an empty list.
 
     Returns:
-        A JSON object as described below.
+        A JSON list with one row per budgeted category per month. Each row has:
+        ``id`` (category id), ``name`` (category name), ``planned`` (planned
+        cash-flow amount), ``actual`` (actual amount), ``remaining``,
+        ``category_group`` (group name), and ``month`` (YYYY-MM-DD).
 
-        IMPORTANT - signs: income and expense amounts are BOTH returned as
-        positive magnitudes; the sign does not distinguish them (negatives
-        appear only for contra entries, e.g. an income-type group that
-        represents money going out). Summing ``planned`` across ``data`` rows
-        therefore adds income to spending and produces a meaningless figure.
-        Always filter on ``category_type`` first.
+        Rows also carry ``set_aside``, ``rollover``, ``rollover_type``,
+        ``category_type`` (``income`` / ``expense`` / ``transfer``) and
+        ``budget_variability``. Income and expense amounts are BOTH positive
+        magnitudes, so filter on ``category_type`` before summing ``planned``.
+        ``planned`` minus ``actual`` equals ``remaining`` only when
+        ``rollover`` is zero. The rollover and variability fields are null
+        when Monarch refuses the extended query; null means not available,
+        never zero.
 
-        IMPORTANT - missing vs zero: when ``flex.status`` is ``unsupported``
-        the extended query was refused, and ``rollover``, ``rollover_type``,
-        ``budget_variability``, ``budget_system``, ``groups``, ``goals`` and
-        ``totals`` are all null as a result. Null means "not available", never
-        zero, and reconciliation is not possible in that state.
-
-        ``budget_system`` - e.g. "fixed_and_flex". Null if the account does not
-        report it OR if the extended query was refused (see above).
-
-        ``data`` - one row per budgeted category per month: ``id`` (category
-        id), ``name``, ``planned`` (planned cash-flow amount), ``actual``,
-        ``remaining``, ``set_aside``, ``rollover``, ``rollover_type``,
-        ``category_group``, ``category_type`` (``income`` / ``expense`` /
-        ``transfer``), ``budget_variability`` and ``month``.
-
-        ``set_aside`` is Monarch's ``plannedSetAsideAmount``, passed through
-        as-is. It is a distinct field from ``planned`` and this server does not
-        combine them; whether Monarch intends it as additive to ``planned`` has
-        not been confirmed against an account that actually uses it, so do not
-        sum the two without checking against Monarch's own figures.
-
-        ``planned`` minus
-        ``actual`` equals ``remaining`` only when ``rollover`` is zero; for
-        rollover categories the carried balance accounts for the difference.
-
-        ``flex`` - the all-up Flexible bucket for accounts on Monarch's
-        "fixed_and_flex" budget system, with ``status`` (``ok``,
-        ``not_configured`` or ``unsupported``), ``budget_variability`` and a
-        ``monthly`` list. Under flex budgeting a single amount covers every
-        category in the Flexible section, so this -- not the per-category rows
-        -- is the number to compare spending against. A ``status`` other than
-        ``ok`` means no amount is available; do NOT treat that as zero.
-        Flexible is the only pooled bucket, so rows whose
-        ``budget_variability`` is ``flexible`` do not carry standalone budgets;
-        Fixed and Non-Monthly categories do.
-
-        ``groups`` - one row per category group per month (``id``, ``name``,
-        ``planned``, ``actual``, ``remaining``, ``rollover``,
-        ``rollover_type``, ``category_type``, ``group_level_budgeting``,
-        ``month``). ``group_level_budgeting`` says which level holds the real
-        budget: when true the group does and its categories carry none; when
-        false this row is only the roll-up of its own categories. Never add a
-        group's ``planned`` to its categories' ``planned`` -- that
-        double-counts either way.
-
-        ``goals`` - savings goals with ``planned_contributions`` and
-        ``actual_contributions`` per month. Goal contributions are a SEPARATE
-        quantity from a category's ``set_aside``; adding them together
-        double-counts. ``archived`` and ``completed`` goals are included but
-        flagged.
-
-        ``totals`` - per-month ``income``, ``expenses``, ``flexible``,
-        ``fixed`` and ``non_monthly`` totals.
-
-        For ``groups``, ``goals`` and ``totals``: ``null`` means the data could
-        not be fetched, while ``[]`` means the query succeeded and there was
-        none.
+        Under Monarch's "fixed_and_flex" system, categories whose
+        ``budget_variability`` is ``flexible`` share one pooled Flexible
+        budget and carry no standalone amount. Use get_budget_summary for the
+        Flexible bucket, group budgets and monthly totals.
     """
     try:
         client = await get_monarch_client()
-        raw, used_flex_query = await get_budget_data(client, start_date, end_date)
-        return json_success(
-            {
-                "tool": "get_budgets",
-                "args": {"start_date": start_date, "end_date": end_date},
-                "budget_system": raw.get("budgetSystem"),
-                "data": format_budget_data(raw),
-                "flex": format_flex_budget(raw, used_flex_query),
-                "groups": format_group_budgets(raw, used_flex_query),
-                "goals": format_goals(raw, used_flex_query),
-                "totals": format_budget_totals(raw, used_flex_query),
-            }
-        )
+        raw, _ = await get_budget_data(client, start_date, end_date)
+        return json_success(format_budget_data(raw))
     except Exception as e:
         return json_error("get_budgets", e)
 
@@ -784,35 +634,54 @@ async def get_budget_summary(
         category_budgets and group_budgets contain one row per category/group
         per month. Each has planned, actual, remaining, and current group
         metadata, including groupLevelBudgetingEnabled. totals_by_month is
-        Monarch's authoritative totalsByMonth response (null if unavailable).
+        Monarch's authoritative totalsByMonth response (null if unavailable);
+        when the extended query succeeds it also carries
+        totalFlexibleExpenses, totalFixedExpenses and totalNonMonthlyExpenses.
 
         Category and group rows overlap: never add the two sets together.
         With group budgeting enabled, zero category plans do not mean there
         is no group allowance. Use totals_by_month for overall totals, and
         retain remaining amounts as returned because carryover can affect
         them. Group metadata describes current settings, not their history.
+
+        budget_system: e.g. "fixed_and_flex"; null if not reported or not
+        available.
+
+        flex: the all-up Flexible bucket under "fixed_and_flex", with status
+        (ok, not_configured or unsupported), budget_variability and a monthly
+        list (month, planned, actual, remaining, rollover, rollover_type).
+        Under flex budgeting a single amount covers every category in the
+        Flexible section, so this, not the per-category rows, is the number
+        to compare flexible spending against. A status other than ok means no
+        amount is available; do NOT treat that as zero.
+
+        goals: savings goals with planned_contributions and
+        actual_contributions per month. archived and completed goals are
+        included but flagged. Goal contributions are a separate quantity from
+        a category's set_aside; adding them double-counts.
+
+        For flex, goals and budget_system: when Monarch refuses the extended
+        query, flex.status is unsupported and the others are null, meaning
+        not available, never zero or none.
     """
     try:
-        default_start, default_end = current_month_range()
         client = await get_monarch_client()
-        result = await client.gql_call(
-            operation="MCPBudgetSummary",
-            graphql_query=BUDGET_SUMMARY_QUERY,
-            variables={
-                "startDate": start_date or default_start,
-                "endDate": end_date or default_end,
-            },
+        result, used_flex_query = await get_budget_data(
+            client,
+            start_date,
+            end_date,
+            fallback=(BUDGET_SUMMARY_OPERATION, BUDGET_SUMMARY_QUERY),
         )
         groups = {
             group["id"]: group
-            for group in result.get("categoryGroups", [])
-            if group.get("id")
+            for group in result.get("categoryGroups") or []
+            if group and group.get("id")
         }
         category_groups = {
             category["id"]: group
             for group in groups.values()
-            for category in group.get("categories", [])
-            if category.get("id")
+            for category in group.get("categories") or []
+            if category and category.get("id")
         }
         category_rows = format_budget_data(result)
         for row in category_rows:
@@ -827,12 +696,16 @@ async def get_budget_summary(
                 }
             )
 
-        budget_data = result.get("budgetData", {})
+        budget_data = result.get("budgetData") or {}
         group_rows = []
-        for group_budget in budget_data.get("monthlyAmountsByCategoryGroup", []):
+        for group_budget in budget_data.get("monthlyAmountsByCategoryGroup") or []:
+            if not group_budget:
+                continue
             group_id = (group_budget.get("categoryGroup") or {}).get("id")
             group = groups.get(group_id, {})
-            for amount in group_budget.get("monthlyAmounts", []):
+            for amount in group_budget.get("monthlyAmounts") or []:
+                if not amount:
+                    continue
                 group_rows.append(
                     {
                         "id": group_id,
@@ -853,12 +726,19 @@ async def get_budget_summary(
                 "category_budgets": category_rows,
                 "group_budgets": group_rows,
                 "totals_by_month": budget_data.get("totalsByMonth"),
+                "budget_system": (
+                    result.get("budgetSystem") if used_flex_query else None
+                ),
+                "flex": format_flex_budget(result, used_flex_query),
+                "goals": format_goals(result, used_flex_query),
                 "aggregation_guidance": (
                     "Category and group rows overlap; do not add them together. "
                     "Use totals_by_month for authoritative overall totals. "
                     "When groupLevelBudgetingEnabled is true, zero category "
                     "plans do not mean the group has no budget. Group metadata "
-                    "reflects current settings, not historical configuration."
+                    "reflects current settings, not historical configuration. "
+                    "Under fixed_and_flex, compare flexible spending against "
+                    "flex, not against per-category rows."
                 ),
             }
         )

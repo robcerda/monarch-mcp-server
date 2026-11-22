@@ -111,7 +111,8 @@ async def test_preserves_group_allowance_when_child_categories_show_zero(
     mock_monarch_client.gql_call.return_value = summary_data
     result = json.loads(await budgets.get_budget_summary("2026-10-01", "2026-11-01"))
 
-    assert result["category_budgets"][0] == {
+    # Every pre-existing key keeps its value; fields added since are additive.
+    expected_row = {
         "id": "groceries",
         "name": "Groceries",
         "planned": 0,
@@ -123,6 +124,7 @@ async def test_preserves_group_allowance_when_child_categories_show_zero(
         "groupLevelBudgetingEnabled": True,
         "month": "2026-10-01",
     }
+    assert expected_row.items() <= result["category_budgets"][0].items()
     assert result["group_budgets"] == [
         {
             "id": "family",
@@ -258,7 +260,10 @@ async def test_existing_get_budgets_contract_is_unchanged(
     original = copy.deepcopy(summary_data)
     mock_monarch_client.gql_call.return_value = summary_data
     result = json.loads(await budgets.get_budgets("2026-10-01", "2026-11-01"))
-    assert result[0] == {
+    # Still a list of rows, and every original key keeps its value. Fields
+    # added since (set_aside, rollover, ...) are additive.
+    assert isinstance(result, list)
+    assert {
         "id": "groceries",
         "name": "Groceries",
         "planned": 0,
@@ -266,5 +271,5 @@ async def test_existing_get_budgets_contract_is_unchanged(
         "remaining": -200,
         "category_group": "Family",
         "month": "2026-10-01",
-    }
+    }.items() <= result[0].items()
     assert summary_data == original

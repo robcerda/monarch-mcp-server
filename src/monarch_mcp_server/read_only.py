@@ -53,6 +53,8 @@ MUTATING_TOOLS: FrozenSet[str] = frozenset(
         "update_transaction_category_group",
         "update_category",
         "set_budget_amount",
+        "set_flexible_budget",
+        "update_flex_rollover_settings",
         # Goals
         "update_savings_goal",
         "set_goal_contribution",

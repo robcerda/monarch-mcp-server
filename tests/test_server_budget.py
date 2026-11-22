@@ -6,7 +6,6 @@ from monarch_mcp_server.tools.budgets import (
     _CATEGORY_FIELD_EXTRA,
     _GROUP_EXTRA,
     format_budget_data,
-    format_budget_totals,
     format_flex_budget,
 )
 
@@ -315,47 +314,3 @@ class TestFormatFlexBudget:
 
         # Nothing usable came back, so report that rather than inventing a row.
         assert format_flex_budget(raw, used_flex_query=True)["status"] == "not_configured"
-
-
-class TestFormatBudgetTotals:
-    def test_none_when_fallback_query_was_used(self):
-        assert format_budget_totals({"budgetData": {}}, used_flex_query=False) is None
-
-    def test_empty_list_when_query_ran_but_returned_none(self):
-        # [] means "asked, none there"; None means "could not ask". Collapsing
-        # them is the ambiguity flex.status exists to avoid.
-        assert format_budget_totals({"budgetData": {}}, used_flex_query=True) == []
-
-    def test_maps_each_bucket(self):
-        raw = {
-            "budgetData": {
-                "totalsByMonth": [
-                    {
-                        "month": "2026-06-01",
-                        "totalFlexibleExpenses": {
-                            "plannedAmount": 1,
-                            "actualAmount": 2,
-                            "remainingAmount": 3,
-                            "previousMonthRolloverAmount": 4,
-                        },
-                        "totalFixedExpenses": None,
-                    }
-                ]
-            }
-        }
-
-        assert format_budget_totals(raw, used_flex_query=True) == [
-            {
-                "month": "2026-06-01",
-                "income": None,
-                "expenses": None,
-                "flexible": {
-                    "planned": 1,
-                    "actual": 2,
-                    "remaining": 3,
-                    "rollover": 4,
-                },
-                "fixed": None,
-                "non_monthly": None,
-            }
-        ]

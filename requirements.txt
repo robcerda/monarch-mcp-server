@@ -1,6 +1,14 @@
-mcp[cli]>=1.10.0
-monarchmoneycommunity>=1.4.0
-gql>=3.4
-keyring>=24.0.0
-python-dotenv>=1.0.0
-pydantic>=2.0.0
+# Compatibility shim. The real pinned set lives in requirements-lock.txt.
+#
+# This file exists so the long documented command still works:
+#   pip install -r requirements.txt --require-hashes
+#
+# It deliberately holds no version specifiers of its own. requirements.txt at
+# the repo root is treated by Dependabot as an independent pip manifest and
+# resolved separately from uv.lock, which produced a pull request pinning
+# mcp 1.13.1 in uv.lock and mcp 2.1.1 here in the same commit. With nothing
+# to resolve, there is nothing for that to get wrong, and CI fails if any
+# specifier appears below.
+#
+# Add or change dependencies in pyproject.toml, then regenerate the lock file.
+-r requirements-lock.txt

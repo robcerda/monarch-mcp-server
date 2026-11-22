@@ -1,9 +1,11 @@
 """Authentication tools."""
 
 import logging
-import os
 
-from mcp.server.fastmcp import Context
+try:  # mcp >= 2.0
+    from mcp.server.mcpserver import Context
+except ImportError:  # mcp < 2.0
+    from mcp.server.fastmcp import Context
 
 from monarch_mcp_server import auth
 from monarch_mcp_server.app import mcp
@@ -51,7 +53,7 @@ async def monarch_login_with_token(ctx: Context) -> str:
     """Sign in to Monarch Money using a browser-copied session token.
 
     Useful for SSO users who can't use password login. Grab the token from
-    browser DevTools → Application → Local Storage → app.monarchmoney.com.
+    browser DevTools → Application → Local Storage → app.monarch.com.
     """
     return await auth.login_with_token_interactive(ctx)
 
@@ -62,19 +64,39 @@ async def monarch_logout() -> str:
     return await auth.logout()
 
 
+def _describe_session(session: dict | None) -> str:
+    """Summarize a stored session without leaking credential values.
+
+    A cookie-mode session carries no token, so probing for a token alone
+    reports a false negative on sessions that authenticate fine.
+    """
+    if not session:
+        return "❌ No Monarch session found in secure storage"
+
+    auth_mode = session.get("auth_mode", "token")
+    credentials = []
+    if session.get("cookies"):
+        credentials.append("cookies")
+    if session.get("token"):
+        credentials.append("token")
+
+    return (
+        f"✅ Session found in secure storage (auth_mode={auth_mode}, "
+        f"credentials: {', '.join(credentials)})"
+    )
+
+
 @mcp.tool()
 async def check_auth_status() -> str:
     """Check if already authenticated with Monarch Money."""
     try:
-        token = secure_session.load_token()
-        if token:
-            status = "✅ Authentication token found in secure keyring storage\n"
-        else:
-            status = "❌ No authentication token found in keyring\n"
+        status = _describe_session(secure_session.load_session()) + "\n"
 
-        email = os.getenv("MONARCH_EMAIL")
-        if email:
-            status += f"📧 Environment email: {email}\n"
+        # MONARCH_EMAIL used to be echoed here. Nothing authenticates with it:
+        # it was read in this one place, to print it. Showing it in an auth
+        # status tool implied setting it configured something, which it has not
+        # since tool calls stopped initiating password logins. It also handed
+        # the account email to any caller that reached the HTTP port.
 
         status += (
             "\n💡 Try get_accounts to test connection or run login_setup.py if needed."
@@ -87,12 +109,15 @@ async def check_auth_status() -> str:
 
 @mcp.tool()
 async def debug_session_loading() -> str:
-    """Debug keyring session loading issues."""
+    """Debug session loading issues."""
     try:
-        token = secure_session.load_token()
-        if token:
-            return "✅ Token found in keyring."
-        return "❌ No token found in keyring. Run login_setup.py to authenticate."
+        session = secure_session.load_session()
+        if session:
+            return _describe_session(session) + "."
+        return (
+            "❌ No Monarch session found in secure storage. "
+            "Run login_setup.py to authenticate."
+        )
     except Exception as e:
         logger.exception("Keyring access failed")
         return f"❌ Keyring access failed: {type(e).__name__}: {e}"

@@ -8,7 +8,12 @@ from gql import gql
 
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
-from monarch_mcp_server.helpers import json_success, json_error
+from monarch_mcp_server.helpers import (
+    json_error,
+    json_rejected,
+    json_success,
+    payload_errors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +87,9 @@ async def create_transaction_category(
         if rollover_type is not None:
             kwargs["rollover_type"] = rollover_type
         result = await client.create_transaction_category(**kwargs)
+        errors = payload_errors(result, "createCategory")
+        if errors:
+            return json_rejected("create_transaction_category", errors)
         return json_success(result)
     except Exception as e:
         return json_error("create_transaction_category", e)
@@ -228,6 +236,7 @@ async def update_category(
     rollover_frequency: Optional[str] = None,
     rollover_target_amount: Optional[float] = None,
     rollover_type: Optional[str] = None,
+    confirm_rollover_reset: bool = False,
     dry_run: bool = False,
 ) -> str:
     """
@@ -256,6 +265,12 @@ async def update_category(
             "variable".
         rollover_target_amount: Target amount for rollover savings goal.
         rollover_type: Rollover type. Values: "monthly".
+        confirm_rollover_reset: Required opt in for rollover_start_month and
+            rollover_starting_balance. Those two restart the category's
+            rollover period, discarding a balance that accumulated over months
+            or years, and there is no undo. Every other argument here is a
+            routine edit, so the destructive pair must be asked for explicitly
+            rather than riding along in a call that reads like a rename.
         dry_run: If True, return the planned changes without executing the
             mutation. Shows current vs proposed values.
 
@@ -273,6 +288,7 @@ async def update_category(
                 rollover_start_month="2026-05-01",
                 rollover_starting_balance=0,
                 rollover_frequency="variable",
+                confirm_rollover_reset=True,
             )
 
         Preview changes without applying:
@@ -293,6 +309,32 @@ async def update_category(
                     "message": (
                         f"Invalid budget_variability: {budget_variability!r}. "
                         f"Must be one of: {sorted(_VALID_BUDGET_VARIABILITY)}"
+                    ),
+                }
+            )
+
+        resets_rollover = [
+            arg
+            for arg, value in (
+                ("rollover_start_month", rollover_start_month),
+                ("rollover_starting_balance", rollover_starting_balance),
+            )
+            if value is not None
+        ]
+        # A dry run writes nothing, so it needs no confirmation. Blocking it
+        # here would contradict this very message, which offers dry_run as
+        # the way to preview the change.
+        if resets_rollover and not confirm_rollover_reset and not dry_run:
+            return json_success(
+                {
+                    "success": False,
+                    "message": (
+                        f"{' and '.join(resets_rollover)} restarts this "
+                        "category's rollover period and discards the balance "
+                        "accumulated so far, which cannot be undone. Pass "
+                        "confirm_rollover_reset=True to proceed, or use "
+                        "dry_run=True to preview. Renames, icons, group moves "
+                        "and budget variability do not need it."
                     ),
                 }
             )

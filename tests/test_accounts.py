@@ -6,6 +6,7 @@ from monarch_mcp_server.tools.accounts import (
     get_accounts,
     get_account_holdings,
     refresh_accounts,
+    update_account,
     get_account_balance_history,
     upload_account_balance_history,
 )
@@ -50,6 +51,76 @@ class TestGetAccounts:
         assert result[0]["balance"] == 0
         assert result[0]["current_balance"] == 0
         assert result[0]["display_balance"] == 0
+
+    async def test_handles_null_owned_by_user(self, mock_monarch_client):
+        mock_monarch_client.get_accounts.return_value = {
+            "accounts": [{"id": "acc-3", "ownedByUser": None}]
+        }
+        result = json.loads(await get_accounts())
+        assert result[0]["owned_by_user"] is None
+
+    async def test_sync_status_ok_by_default(self):
+        result = json.loads(await get_accounts())
+        assert result[0]["sync"]["state"] == "ok"
+        assert result[0]["sync"]["needs_reauth"] is False
+        assert result[0]["sync"]["disconnected_at"] is None
+        assert result[0]["is_manual"] is False
+        assert result[0]["last_updated_at"] is None
+
+    async def test_sync_status_surfaces_broken_connection(self, mock_monarch_client):
+        """A frozen bank link is silent in Monarch; get_accounts must say so."""
+        mock_monarch_client.get_accounts.return_value = {
+            "accounts": [
+                {
+                    "id": "acc-reauth",
+                    "displayName": "Needs Login",
+                    "displayLastUpdatedAt": "2026-02-08T04:00:00+00:00",
+                    "credential": {
+                        "updateRequired": True,
+                        "dataProvider": "PLAID",
+                        "institution": {"status": "RELINK"},
+                    },
+                },
+                {
+                    "id": "acc-disc",
+                    "displayName": "Dropped",
+                    "credential": {
+                        "updateRequired": False,
+                        "disconnectedFromDataProviderAt": "2026-03-01T00:00:00+00:00",
+                        "dataProvider": "FINICITY",
+                    },
+                },
+                {
+                    "id": "acc-paused",
+                    "displayName": "Paused",
+                    "syncDisabled": True,
+                    "credential": {"updateRequired": False},
+                },
+                {
+                    "id": "acc-manual",
+                    "displayName": "House",
+                    "isManual": True,
+                    "credential": None,
+                },
+            ]
+        }
+        result = {a["id"]: a for a in json.loads(await get_accounts())}
+
+        assert result["acc-reauth"]["sync"]["state"] == "needs_reauth"
+        assert result["acc-reauth"]["sync"]["needs_reauth"] is True
+        assert result["acc-reauth"]["sync"]["data_provider"] == "PLAID"
+        assert result["acc-reauth"]["sync"]["connection_status"] == "RELINK"
+        assert result["acc-reauth"]["last_updated_at"] == "2026-02-08T04:00:00+00:00"
+
+        assert result["acc-disc"]["sync"]["state"] == "disconnected"
+        assert result["acc-disc"]["sync"]["disconnected_at"] == "2026-03-01T00:00:00+00:00"
+
+        assert result["acc-paused"]["sync"]["state"] == "sync_disabled"
+        assert result["acc-paused"]["sync"]["sync_disabled"] is True
+
+        assert result["acc-manual"]["sync"]["state"] == "manual"
+        assert result["acc-manual"]["sync"]["connection_status"] is None
+        assert result["acc-manual"]["is_manual"] is True
 
     async def test_handles_empty_accounts(self, mock_monarch_client):
         mock_monarch_client.get_accounts.return_value = {"accounts": []}
@@ -219,3 +290,103 @@ class TestUploadAccountBalanceHistory:
         mock_monarch_client.get_account_history.side_effect = Exception("Timeout")
         result = await upload_account_balance_history("12345", '{"2026-04-21": 0}')
         assert "upload_account_balance_history" in result
+
+
+class TestUpdateAccount:
+    """A generic aggregator name or a wrongly counted balance previously forced
+    a trip to the web UI; these cover the tool that closes that gap."""
+
+    async def test_renames_an_account(self, mock_monarch_client):
+        mock_monarch_client.update_account.return_value = {
+            "updateAccount": {
+                "account": {
+                    "displayName": "Issuer Card Product (...0000)",
+                    "currentBalance": -816.78,
+                    "includeInNetWorth": True,
+                    "hideFromList": False,
+                    "hideTransactionsFromReports": False,
+                },
+                "errors": None,
+            }
+        }
+        result = json.loads(
+            await update_account(
+                account_id="acc-1", name="Issuer Card Product (...0000)"
+            )
+        )
+        assert result["updated"] is True
+        assert result["applied"] == {"account_name": "Issuer Card Product (...0000)"}
+        mock_monarch_client.update_account.assert_awaited_once_with(
+            account_id="acc-1", account_name="Issuer Card Product (...0000)"
+        )
+
+    async def test_omitted_fields_are_not_sent(self, mock_monarch_client):
+        """Only what the caller passed may reach Monarch, so an unrelated
+        setting cannot be reset to a default as a side effect."""
+        mock_monarch_client.update_account.return_value = {
+            "updateAccount": {"account": {}, "errors": None}
+        }
+        await update_account(account_id="acc-1", include_in_net_worth=False)
+        mock_monarch_client.update_account.assert_awaited_once_with(
+            account_id="acc-1", include_in_net_worth=False
+        )
+
+    async def test_false_is_a_real_value_not_an_omission(self, mock_monarch_client):
+        """include_in_net_worth=False is the whole point of the flag; a falsy
+        check rather than an `is not None` check would silently drop it."""
+        mock_monarch_client.update_account.return_value = {
+            "updateAccount": {"account": {}, "errors": None}
+        }
+        await update_account(
+            account_id="acc-1",
+            hide_from_summary_list=False,
+            hide_transactions_from_reports=False,
+        )
+        _, kwargs = mock_monarch_client.update_account.await_args
+        assert kwargs["hide_from_summary_list"] is False
+        assert kwargs["hide_transactions_from_reports"] is False
+
+    async def test_zero_balance_is_not_treated_as_omitted(self, mock_monarch_client):
+        """Setting a paid-off account to 0.00 is a legitimate correction."""
+        mock_monarch_client.update_account.return_value = {
+            "updateAccount": {"account": {}, "errors": None}
+        }
+        await update_account(account_id="acc-1", balance=0.0)
+        _, kwargs = mock_monarch_client.update_account.await_args
+        assert kwargs["account_balance"] == 0.0
+
+    async def test_no_fields_is_an_error_not_a_silent_noop(self, mock_monarch_client):
+        result = json.loads(await update_account(account_id="acc-1"))
+        assert result["error"] is True
+        mock_monarch_client.update_account.assert_not_awaited()
+
+    async def test_dry_run_reports_current_and_proposed_without_writing(
+        self, mock_monarch_client
+    ):
+        result = json.loads(
+            await update_account(account_id="acc-1", name="Renamed", dry_run=True)
+        )
+        assert result["dry_run"] is True
+        assert result["current"]["name"] == "Checking Account"
+        assert result["proposed"] == {"account_name": "Renamed"}
+        mock_monarch_client.update_account.assert_not_awaited()
+
+    async def test_dry_run_on_unknown_account_errors(self, mock_monarch_client):
+        result = json.loads(
+            await update_account(account_id="nope", name="X", dry_run=True)
+        )
+        assert result["error"] is True
+        assert "not found" in result["message"]
+
+    async def test_monarch_payload_errors_are_surfaced(self, mock_monarch_client):
+        mock_monarch_client.update_account.return_value = {
+            "updateAccount": {
+                "account": None,
+                "errors": [{"message": "invalid account type"}],
+            }
+        }
+        result = json.loads(await update_account(account_id="acc-1", name="X"))
+        # Rejections use the json_rejected shape shared by the other mutators
+        # (see #125), rather than the json_error shape used for exceptions.
+        assert result["success"] is False
+        assert "invalid account type" in json.dumps(result)

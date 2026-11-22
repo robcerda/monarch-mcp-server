@@ -14,11 +14,34 @@ Supports three auth paths in order of recommendation:
 
 import asyncio
 import getpass
+import os
 import sys
 from pathlib import Path
 
 src_path = Path(__file__).parent / "src"
 sys.path.insert(0, str(src_path))
+
+
+def _use_utf8_console() -> None:
+    """Stop the script dying on its own output.
+
+    Every prompt and status line here contains emoji. On Windows the console
+    defaults to the locale code page (cp1252 on most installs), which cannot
+    encode them, so the first print() raises UnicodeEncodeError and the script
+    exits before the user reaches the menu -- with an encoding traceback that
+    says nothing about logging in. errors="replace" keeps that from ever being
+    fatal again on a terminal that still cannot render a character.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
+_use_utf8_console()
 
 from monarchmoney import CaptchaRequiredException, RequireMFAException
 from monarch_mcp_server.monarch_auth import (
@@ -30,6 +53,52 @@ from monarch_mcp_server.monarch_auth import (
 from monarch_mcp_server.secure_session import secure_session
 
 
+def _default_cookie_file() -> Path:
+    """Resolve the cookie file path for the current platform.
+
+    Override with the MONARCH_MCP_COOKIE_FILE environment variable.
+    Defaults: %APPDATA%\\monarch-mcp\\cookie.txt on Windows,
+    $XDG_CONFIG_HOME/monarch-mcp/cookie.txt (or ~/.config/...) elsewhere.
+    """
+    override = os.environ.get("MONARCH_MCP_COOKIE_FILE")
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA")
+        base_path = Path(base) if base else Path.home() / "AppData" / "Roaming"
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        base_path = Path(xdg) if xdg else Path.home() / ".config"
+    return base_path / "monarch-mcp" / "cookie.txt"
+
+
+COOKIE_FILE = _default_cookie_file()
+
+
+def _read_cookie_string() -> str:
+    """Return the browser cookie string for login.
+
+    Preferred source is COOKIE_FILE. On POSIX terminals, interactive
+    pastes via getpass()/input() are silently truncated at the tty's
+    canonical-mode input buffer (MAX_CANON, 1024 bytes on macOS/Linux),
+    and real Monarch cookie headers routinely exceed that, so pasting at
+    a prompt fails in a confusing way. The file path works identically on
+    Windows, macOS, and Linux and has no length limit.
+    """
+    if COOKIE_FILE.is_file():
+        cookie = COOKIE_FILE.read_text(encoding="utf-8").strip()
+        if cookie:
+            print(f"🔑 Using cookie from {COOKIE_FILE}")
+            return cookie
+    print(f"(No cookie file found at {COOKIE_FILE})")
+    print("⚠️  On macOS/Linux, terminal pastes longer than ~1024 chars are")
+    print("    silently truncated. If login fails below, save the cookie to")
+    print("    the file above and re-run this script (restrict permissions:")
+    print("    chmod 600 on macOS/Linux; on Windows the file inherits your")
+    print("    user-profile ACLs).")
+    return getpass.getpass("Paste the Cookie header value: ").strip()
+
+
 async def _login_with_cookies():
     print("\n📋 To copy the right cookie string:")
     print("  1. Log in to https://app.monarch.com in Chrome or Firefox")
@@ -38,8 +107,10 @@ async def _login_with_cookies():
     print("     (or any request to api.monarch.com)")
     print("  4. Scroll to 'Request Headers' and find the 'cookie:' header")
     print("  5. Copy the full value (a long string of key=value; pairs)")
+    print(f"  6. Save it to {COOKIE_FILE} (recommended),")
+    print("     or paste it at the prompt below")
     print()
-    cookie_string = getpass.getpass("Paste the Cookie header value: ").strip()
+    cookie_string = _read_cookie_string()
     if not cookie_string:
         print("❌ No cookie string provided. Exiting.")
         return None
@@ -125,9 +196,12 @@ async def main():
         print(f"⚠️  Could not check version: {e}")
 
     try:
-        secure_session.delete_token()
-        print("🗑️ Cleared existing secure sessions")
-
+        # The previous session is deliberately left in place until the new one
+        # is verified and saved. Deleting it up front meant that a bad cookie
+        # paste, a Cloudflare captcha, or a 401 on the connection test left the
+        # user with no working session at all, worse off than before running
+        # this script. save_authenticated_session already overwrites whatever
+        # is stored, so nothing needs clearing first.
         print("\nHow do you sign in to Monarch Money?")
         print(
             "  1) Session cookies from browser   "

@@ -7,6 +7,7 @@ import pytest
 
 from monarch_mcp_server.tools.merchants import (
     get_merchant,
+    merge_merchants,
     review_recurring_stream,
     update_merchant,
 )
@@ -363,3 +364,134 @@ class TestReviewRecurringStream:
         data = json.loads(result)
         assert data["error"] is True
         assert "Auth needed" in data["message"]
+
+
+class TestUpdateMerchantRejectsBlankName:
+    """A whitespace rename would corrupt the record every transaction points at."""
+
+    @patch("monarch_mcp_server.tools.merchants.get_monarch_client")
+    async def test_a_blank_name_is_refused(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await update_merchant(merchant_id="m_1", name="   "))
+        assert data["error"] is True
+        mock_client.gql_call.assert_not_called()
+
+
+class TestUpdateMerchantFrequency:
+    """Monarch refuses "annually" with an opaque error, so it is sent as "yearly"."""
+
+    @staticmethod
+    def _sent_frequency(mock_client):
+        variables = mock_client.gql_call.call_args.kwargs["variables"]
+        return variables["input"]["recurrence"]["frequency"]
+
+    @pytest.mark.parametrize("given", ["annually", "Annually", " ANNUALLY "])
+    @patch("monarch_mcp_server.tools.merchants.get_monarch_client")
+    async def test_annually_is_sent_as_yearly(self, mock_get_client, given):
+        mock_client = AsyncMock()
+        mock_client.gql_call.return_value = {
+            "updateMerchant": {"merchant": {"id": "m_1"}, "errors": None}
+        }
+        mock_get_client.return_value = mock_client
+
+        await update_merchant(merchant_id="m_1", frequency=given)
+
+        assert self._sent_frequency(mock_client) == "yearly"
+
+    @pytest.mark.parametrize(
+        "given", ["weekly", "biweekly", "monthly", "quarterly", "yearly"]
+    )
+    @patch("monarch_mcp_server.tools.merchants.get_monarch_client")
+    async def test_verified_values_pass_through(self, mock_get_client, given):
+        mock_client = AsyncMock()
+        mock_client.gql_call.return_value = {
+            "updateMerchant": {"merchant": {"id": "m_1"}, "errors": None}
+        }
+        mock_get_client.return_value = mock_client
+
+        await update_merchant(merchant_id="m_1", frequency=given)
+
+        assert self._sent_frequency(mock_client) == given
+
+    @patch("monarch_mcp_server.tools.merchants.get_monarch_client")
+    async def test_unverified_values_are_not_blocked(self, mock_get_client):
+        """No allow-list: Monarch may accept values nobody has verified yet."""
+        mock_client = AsyncMock()
+        mock_client.gql_call.return_value = {
+            "updateMerchant": {"merchant": {"id": "m_1"}, "errors": None}
+        }
+        mock_get_client.return_value = mock_client
+
+        await update_merchant(merchant_id="m_1", frequency="twice_a_month")
+
+        assert self._sent_frequency(mock_client) == "twice_a_month"
+
+
+class TestMergeMerchants:
+    """Tests for merge_merchants tool."""
+
+    @patch("monarch_mcp_server.tools.merchants.get_monarch_client")
+    async def test_merges_source_into_target(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_client.delete_merchant.return_value = {"deleteMerchant": {"success": True}}
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(
+            await merge_merchants(source_merchant_id="1", target_merchant_id="2")
+        )
+
+        assert data == {
+            "success": True,
+            "source_merchant_id": "1",
+            "target_merchant_id": "2",
+        }
+        mock_client.delete_merchant.assert_awaited_once_with(
+            "1", move_to_merchant_id="2"
+        )
+
+    @patch("monarch_mcp_server.tools.merchants.get_monarch_client")
+    @pytest.mark.parametrize(
+        "response", [{"deleteMerchant": {"success": False}}, {"deleteMerchant": None}]
+    )
+    async def test_a_refusal_is_not_reported_as_success(
+        self, mock_get_client, response
+    ):
+        mock_client = AsyncMock()
+        mock_client.delete_merchant.return_value = response
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(
+            await merge_merchants(source_merchant_id="1", target_merchant_id="2")
+        )
+
+        assert data["success"] is False
+
+    @patch("monarch_mcp_server.tools.merchants.get_monarch_client")
+    @pytest.mark.parametrize(
+        "source, target",
+        [("1", "1"), ("1 ", "1"), ("1", ""), ("1", "   "), ("", "2")],
+    )
+    async def test_bad_ids_never_reach_monarch(self, mock_get_client, source, target):
+        mock_client = AsyncMock()
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(
+            await merge_merchants(source_merchant_id=source, target_merchant_id=target)
+        )
+
+        assert data["error"] is True
+        mock_client.delete_merchant.assert_not_called()
+
+    @patch("monarch_mcp_server.tools.merchants.get_monarch_client")
+    async def test_padded_ids_are_trimmed(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_client.delete_merchant.return_value = {"deleteMerchant": {"success": True}}
+        mock_get_client.return_value = mock_client
+
+        await merge_merchants(source_merchant_id=" 1 ", target_merchant_id=" 2 ")
+
+        mock_client.delete_merchant.assert_awaited_once_with(
+            "1", move_to_merchant_id="2"
+        )

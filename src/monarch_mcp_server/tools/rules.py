@@ -1,13 +1,20 @@
 """Transaction rules tools with GraphQL queries."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from collections import Counter
+from typing import Any, Dict, List, Optional, Tuple
 
 from gql import gql
+from gql.transport.exceptions import TransportQueryError
 
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
-from monarch_mcp_server.helpers import json_success, json_error
+from monarch_mcp_server.helpers import (
+    format_exception,
+    json_error,
+    json_success,
+    require_nonblank,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +91,64 @@ query GetTransactionRules {
     }
     setHideFromReportsAction
     reviewStatusAction
+    sendNotificationAction
+    setLinkToPaydownBudgetAction
+    criteriaOwnerIsJoint
+    criteriaOwnerUserIds
+    criteriaBusinessEntityIds
+    criteriaBusinessEntityIsUnassigned
+    criteriaBusinessEntities {
+      id
+      name
+      __typename
+    }
+    merchantCriteria {
+      operator
+      value
+      __typename
+    }
+    actionSetOwnerIsJoint
+    actionSetOwner {
+      id
+      displayName
+      __typename
+    }
+    actionSetBusinessEntity {
+      id
+      name
+      __typename
+    }
+    actionSetBusinessEntityIsUnassigned
+    linkSavingsGoalAction {
+      id
+      name
+      __typename
+    }
+    needsReviewByUserAction {
+      id
+      displayName
+      __typename
+    }
+    splitTransactionsAction {
+      amountType
+      splitsInfo {
+        categoryId
+        merchantName
+        amount
+        goalId
+        savingsGoalId
+        tags
+        hideFromReports
+        reviewStatus
+        needsReviewByUserId
+        ownerUserId
+        ownerIsJoint
+        businessEntityId
+        businessEntityIsUnassigned
+        __typename
+      }
+      __typename
+    }
     recentApplicationCount
     lastAppliedAt
     __typename
@@ -91,9 +156,15 @@ query GetTransactionRules {
 }
 """)
 
+
 CREATE_TRANSACTION_RULE_MUTATION = gql("""
 mutation Common_CreateTransactionRuleMutationV2($input: CreateTransactionRuleInput!) {
   createTransactionRuleV2(input: $input) {
+    transactionRule {
+      id
+      order
+      __typename
+    }
     errors {
       fieldErrors {
         field
@@ -112,6 +183,11 @@ mutation Common_CreateTransactionRuleMutationV2($input: CreateTransactionRuleInp
 UPDATE_TRANSACTION_RULE_MUTATION = gql("""
 mutation Common_UpdateTransactionRuleMutationV2($input: UpdateTransactionRuleInput!) {
   updateTransactionRuleV2(input: $input) {
+    transactionRule {
+      id
+      order
+      __typename
+    }
     errors {
       fieldErrors {
         field
@@ -145,6 +221,174 @@ mutation Common_DeleteTransactionRule($id: ID!) {
   }
 }
 """)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _business_entity_action(business_entity_id: str) -> Dict[str, Any]:
+    """Rule-input fields for a business-entity action.
+
+    Mirrors set_business_entity: an id assigns that business, the literal
+    "none" marks matching transactions as personal (unassigned).
+    """
+    require_nonblank(business_entity_id, "set_business_entity_id")
+    if business_entity_id.strip().lower() == "none":
+        return {"actionSetBusinessEntityIsUnassigned": True}
+    return {"actionSetBusinessEntity": business_entity_id.strip()}
+
+
+def _criteria_to_input(criteria: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Convert criteria as returned by the API back into mutation-input shape."""
+    return [
+        {"operator": c.get("operator"), "value": c.get("value")}
+        for c in (criteria or [])
+        if c
+    ]
+
+
+def _condition_key(condition: Dict[str, Any]) -> Tuple[Any, Any]:
+    return condition.get("operator"), condition.get("value")
+
+
+def _existing_merchant_criteria(
+    existing: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Read a rule's merchant condition back for an update.
+
+    Returns ``(merchant_name_criteria, legacy_merchant_criteria)`` in input
+    shape. The second is empty unless it has to be resent in its own field.
+
+    Monarch keeps the merchant condition in one of two fields. Newer rules use
+    ``merchantNameCriteria``. Older ones store it in the legacy
+    ``merchantCriteria`` (``merchant_criteria`` in get_transaction_rules) and
+    leave ``merchantNameCriteria`` empty, so reading only the newer field made
+    them look criteria-less and an action-only update was refused.
+
+    A legacy-only condition is moved into ``merchantNameCriteria``, the field
+    an explicit ``merchant_criteria`` argument is sent in, which is the path
+    known to work against the live API. It is not echoed in its own field as
+    well, which would send the same condition twice.
+
+    When a rule holds both fields, the legacy one is resent separately only if
+    it says something different. Merging the two into one list would OR
+    conditions that, as separate criteria, are ANDed, and widen the rule.
+    """
+    current = _criteria_to_input(existing.get("merchantNameCriteria"))
+    legacy = _criteria_to_input(existing.get("merchantCriteria"))
+    if not current:
+        return legacy, []
+    if Counter(map(_condition_key, legacy)) == Counter(map(_condition_key, current)):
+        return current, []
+    return current, legacy
+
+
+def _build_criteria(
+    values: Optional[List[str]],
+    single: Optional[str],
+    operator: Optional[str],
+    structured: Optional[List[Dict[str, Any]]],
+) -> Optional[List[Dict[str, Any]]]:
+    """Build a text-criteria list.
+
+    ``structured`` takes precedence and allows a different operator per value.
+    Monarch supports mixed operators within one criterion (e.g. contains
+    "netflix" OR eq "apple"), which a single shared operator cannot express.
+    """
+    if structured:
+        return [
+            {"operator": c.get("operator") or "contains", "value": c.get("value")}
+            for c in structured
+            if c.get("value")
+        ]
+    vals = [v for v in (values or []) if v]
+    if not vals and single:
+        vals = [single]
+    if not vals:
+        return None
+    op = operator or "contains"
+    return [{"operator": op, "value": v} for v in vals]
+
+
+def _build_amount_criteria(
+    operator: Optional[str],
+    value: Optional[float],
+    is_expense: bool,
+    lower: Optional[float],
+    upper: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    """Build amount criteria, including the ``between`` range variant."""
+    if operator == "between":
+        if lower is None or upper is None:
+            raise ValueError(
+                "amount_operator='between' requires amount_lower and amount_upper"
+            )
+        return {
+            "operator": "between",
+            "isExpense": is_expense,
+            "value": None,
+            "valueRange": {"lower": lower, "upper": upper},
+        }
+    if operator and value is not None:
+        return {
+            "operator": operator,
+            "isExpense": is_expense,
+            "value": value,
+            "valueRange": None,
+        }
+
+    # Exactly one half supplied. Dropping the criterion here would create a
+    # rule far broader than the caller asked for and still report success: an
+    # amount threshold that silently disappears leaves a rule matching every
+    # transaction from that merchant, and with apply_to_existing it rewrites
+    # the history immediately. A standing policy is worth failing loudly over.
+    if operator or value is not None or lower is not None or upper is not None:
+        raise ValueError(
+            "Incomplete amount criteria "
+            f"(amount_operator={operator!r}, amount_value={value!r}, "
+            f"amount_lower={lower!r}, amount_upper={upper!r}). "
+            "Give amount_operator with amount_value, or "
+            "amount_operator='between' with both amount_lower and "
+            "amount_upper."
+        )
+    return None
+
+
+def _meaningful_errors(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return a useful error payload, or None if there was no real error.
+
+    Monarch rejects some inputs with ``{fieldErrors: null, message: null,
+    code: null}`` -- truthy, but carrying no information. Reporting that
+    verbatim tells the caller nothing, so it is replaced with a plain message.
+    """
+    if not payload:
+        return None
+    meaningful = {
+        k: v for k, v in payload.items() if k != "__typename" and v is not None
+    }
+    return meaningful or {
+        "message": "Monarch rejected the request without giving a reason"
+    }
+
+
+async def _fetch_rules(client) -> List[Dict[str, Any]]:
+    """Fetch every transaction rule."""
+    result = await client.gql_call(
+        operation="GetTransactionRules",
+        graphql_query=GET_TRANSACTION_RULES_QUERY,
+        variables={},
+    )
+    return result.get("transactionRules") or []
+
+
+async def _fetch_rule(client, rule_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single rule by id, or None if it does not exist."""
+    for rule in await _fetch_rules(client):
+        if rule.get("id") == rule_id:
+            return rule
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -194,6 +438,13 @@ async def get_transaction_rules() -> str:
                 "link_goal_action": rule.get("linkGoalAction"),
                 "hide_from_reports_action": rule.get("setHideFromReportsAction"),
                 "review_status_action": rule.get("reviewStatusAction"),
+                "set_business_entity_action": {
+                    "id": rule["actionSetBusinessEntity"].get("id"),
+                    "name": rule["actionSetBusinessEntity"].get("name"),
+                } if rule.get("actionSetBusinessEntity") else None,
+                "set_business_entity_unassigned_action": bool(
+                    rule.get("actionSetBusinessEntityIsUnassigned")
+                ),
                 "recent_application_count": rule.get("recentApplicationCount"),
                 "last_applied_at": rule.get("lastAppliedAt"),
             }
@@ -209,87 +460,145 @@ async def create_transaction_rule(
     merchant_criteria_operator: Optional[str] = None,
     merchant_criteria_value: Optional[str] = None,
     merchant_criteria_values: Optional[List[str]] = None,
+    merchant_criteria: Optional[List[Dict[str, Any]]] = None,
+    original_statement_operator: Optional[str] = None,
+    original_statement_values: Optional[List[str]] = None,
+    original_statement_criteria: Optional[List[Dict[str, Any]]] = None,
+    use_original_statement: Optional[bool] = None,
     amount_operator: Optional[str] = None,
     amount_value: Optional[float] = None,
+    amount_lower: Optional[float] = None,
+    amount_upper: Optional[float] = None,
     amount_is_expense: bool = True,
     set_category_id: Optional[str] = None,
     set_merchant_name: Optional[str] = None,
     add_tag_ids: Optional[List[str]] = None,
+    link_goal_id: Optional[str] = None,
     hide_from_reports: Optional[bool] = None,
     review_status: Optional[str] = None,
+    set_business_entity_id: Optional[str] = None,
     account_ids: Optional[List[str]] = None,
+    category_ids: Optional[List[str]] = None,
     apply_to_existing: bool = False,
 ) -> str:
     """
     Create a new transaction auto-categorization rule.
 
-    Rules automatically categorize future transactions based on conditions.
+    Rules automatically update transactions as they arrive. Every matching rule
+    runs, in order, so a later rule overwrites an earlier one. Conditions inside
+    one criterion are OR'd; different criteria are AND'd together.
 
     Args:
-        merchant_criteria_operator: How to match merchant ("eq", "contains")
-        merchant_criteria_value: Merchant name/pattern to match
-        amount_operator: Amount comparison ("gt", "lt", "eq", "between")
-        amount_value: Amount threshold value
-        amount_is_expense: Whether amount is expense (negative) or income
-        set_category_id: Category ID to assign (use get_categories for IDs)
-        set_merchant_name: Merchant name to set on matching transactions
-        add_tag_ids: List of tag IDs to add (use get_tags for IDs)
-        hide_from_reports: Whether to hide matching transactions from reports
-        review_status: Review status to set ("needs_review" or null)
-        account_ids: Limit rule to specific account IDs
-        apply_to_existing: Whether to apply rule to existing transactions
+        merchant_criteria_operator: Operator shared by merchant_criteria_values
+            ("contains" or "eq"). Defaults to "contains".
+        merchant_criteria_value: Single merchant name/pattern to match.
+        merchant_criteria_values: Several merchant values, OR'd together.
+        merchant_criteria: Merchant criteria with a per-value operator, e.g.
+            [{"operator": "contains", "value": "netflix"},
+             {"operator": "eq", "value": "apple"}]. Takes precedence over the
+            two arguments above.
+        original_statement_values: Match against the raw bank statement text
+            instead of the merchant name. Monarch recommends this as the more
+            stable option, since it does not change when a merchant is
+            re-identified.
+        original_statement_operator: Operator shared by the values above.
+        original_statement_criteria: Original-statement criteria with a
+            per-value operator (same shape as merchant_criteria).
+        use_original_statement: Apply merchant criteria to the original
+            statement text rather than the merchant name.
+        amount_operator: "gt", "lt", "eq" or "between".
+        amount_value: Threshold for gt/lt/eq.
+        amount_lower/amount_upper: Bounds when amount_operator="between".
+        amount_is_expense: True for debits, False for credits.
+        set_category_id: Category id to assign (see get_transaction_categories).
+        set_merchant_name: Merchant name to set on matching transactions.
+        add_tag_ids: Tag ids to add (see get_transaction_tags).
+        link_goal_id: Goal id to link matching transactions to. Monarch
+            requires account_ids to be set as well.
+        hide_from_reports: Hide matching transactions from reports.
+        review_status: Review status to set, e.g. "needs_review".
+        set_business_entity_id: Business to assign matching transactions to
+            (id from get_business_entities), or "none" to mark them personal.
+            Requires a Monarch plan with businesses.
+        account_ids: Restrict the rule to these accounts. This is a matching
+            criterion, not an action.
+        category_ids: Restrict the rule to transactions already in these
+            categories. Also a matching criterion.
+        apply_to_existing: Also apply the rule to existing transactions.
 
     Returns:
-        Result of rule creation.
+        JSON with the new rule's id on success.
 
     Example:
-        Create rule: "Amazon purchases → Shopping category"
         create_transaction_rule(
-            merchant_criteria_operator="contains",
-            merchant_criteria_value="amazon",
-            set_category_id="cat_123"
+            merchant_criteria_values=["amazon"],
+            set_category_id="cat_123",
         )
     """
     try:
+        if set_merchant_name is not None:
+            require_nonblank(set_merchant_name, "set_merchant_name")
+        business_action = (
+            _business_entity_action(set_business_entity_id)
+            if set_business_entity_id is not None else {}
+        )
+
         client = await get_monarch_client()
+
+        merchant = _build_criteria(
+            merchant_criteria_values,
+            merchant_criteria_value,
+            merchant_criteria_operator,
+            merchant_criteria,
+        )
+        statement = _build_criteria(
+            original_statement_values,
+            None,
+            original_statement_operator,
+            original_statement_criteria,
+        )
+        amount = _build_amount_criteria(
+            amount_operator, amount_value, amount_is_expense,
+            amount_lower, amount_upper,
+        )
+
+        if not (merchant or statement or amount or account_ids or category_ids):
+            return json_success({
+                "success": False,
+                "message": (
+                    "A rule needs at least one matching criterion: merchant, "
+                    "original statement, amount, accounts or categories."
+                ),
+            })
 
         rule_input: Dict[str, Any] = {
             "applyToExistingTransactions": apply_to_existing,
         }
-
-        # Accept either a single merchant value or a list of values. When a
-        # list is given, build one criterion per value sharing the operator
-        # (defaults to "contains"). This lets one rule match many merchants.
-        _merchant_op = merchant_criteria_operator or "contains"
-        _merchant_values = [v for v in (merchant_criteria_values or []) if v]
-        if not _merchant_values and merchant_criteria_value:
-            _merchant_values = [merchant_criteria_value]
-        if _merchant_values:
-            rule_input["merchantNameCriteria"] = [
-                {"operator": _merchant_op, "value": v} for v in _merchant_values
-            ]
-
-        if amount_operator and amount_value is not None:
-            rule_input["amountCriteria"] = {
-                "operator": amount_operator,
-                "isExpense": amount_is_expense,
-                "value": amount_value,
-                "valueRange": None,
-            }
-
+        if merchant:
+            rule_input["merchantNameCriteria"] = merchant
+        if statement:
+            rule_input["originalStatementCriteria"] = statement
+        if amount:
+            rule_input["amountCriteria"] = amount
         if account_ids:
             rule_input["accountIds"] = account_ids
-
+        if category_ids:
+            rule_input["categoryIds"] = category_ids
+        if use_original_statement is not None:
+            rule_input["merchantCriteriaUseOriginalStatement"] = use_original_statement
         if set_category_id:
             rule_input["setCategoryAction"] = set_category_id
         if set_merchant_name:
             rule_input["setMerchantAction"] = set_merchant_name
-        if add_tag_ids:
+        if add_tag_ids is not None:
             rule_input["addTagsAction"] = add_tag_ids
+        if link_goal_id:
+            rule_input["linkGoalAction"] = link_goal_id
         if hide_from_reports is not None:
             rule_input["setHideFromReportsAction"] = hide_from_reports
         if review_status:
             rule_input["reviewStatusAction"] = review_status
+        rule_input.update(business_action)
 
         result = await client.gql_call(
             operation="Common_CreateTransactionRuleMutationV2",
@@ -297,11 +606,18 @@ async def create_transaction_rule(
             variables={"input": rule_input},
         )
 
-        errors = result.get("createTransactionRuleV2", {}).get("errors")
+        payload = result.get("createTransactionRuleV2") or {}
+        errors = _meaningful_errors(payload.get("errors"))
         if errors:
             return json_success({"success": False, "errors": errors})
 
-        return json_success({"success": True, "message": "Rule created successfully"})
+        rule = payload.get("transactionRule") or {}
+        return json_success({
+            "success": True,
+            "rule_id": rule.get("id"),
+            "order": rule.get("order"),
+            "message": "Rule created successfully",
+        })
     except Exception as e:
         return json_error("create_transaction_rule", e)
 
@@ -312,79 +628,316 @@ async def update_transaction_rule(
     merchant_criteria_operator: Optional[str] = None,
     merchant_criteria_value: Optional[str] = None,
     merchant_criteria_values: Optional[List[str]] = None,
+    merchant_criteria: Optional[List[Dict[str, Any]]] = None,
+    original_statement_operator: Optional[str] = None,
+    original_statement_values: Optional[List[str]] = None,
+    original_statement_criteria: Optional[List[Dict[str, Any]]] = None,
+    use_original_statement: Optional[bool] = None,
     amount_operator: Optional[str] = None,
     amount_value: Optional[float] = None,
+    amount_lower: Optional[float] = None,
+    amount_upper: Optional[float] = None,
     amount_is_expense: bool = True,
     set_category_id: Optional[str] = None,
     set_merchant_name: Optional[str] = None,
     add_tag_ids: Optional[List[str]] = None,
+    link_goal_id: Optional[str] = None,
     hide_from_reports: Optional[bool] = None,
     review_status: Optional[str] = None,
+    set_business_entity_id: Optional[str] = None,
     account_ids: Optional[List[str]] = None,
+    category_ids: Optional[List[str]] = None,
+    clear_category: bool = False,
+    clear_merchant: bool = False,
+    clear_tags: bool = False,
+    clear_goal_link: bool = False,
+    clear_review_status: bool = False,
+    clear_business_entity: bool = False,
     apply_to_existing: bool = False,
 ) -> str:
     """
     Update an existing transaction rule.
 
+    **This call is non-destructive — omitted fields are preserved
+    automatically.** Pass only what you want to change.
+
+    Monarch's update mutation treats criteria and actions asymmetrically, and
+    both halves are hostile to a partial update:
+
+    * It ignores the request entirely unless the input carries at least one
+      matching criterion, so a call that only changes an action would be
+      silently discarded.
+    * It CLEARS any action that is absent from the input. Sending only
+      `link_goal_id` would silently wipe an existing category and merchant.
+
+    So this reads the rule first and resends its full current state — criteria
+    and actions alike — with your changes merged on top. To remove something on
+    purpose, use the matching `clear_*` flag; leaving an argument unset always
+    means "keep whatever is there".
+
+    The merchant condition is kept whether get_transaction_rules shows it as
+    `merchant_name_criteria` or, on older rules, as `merchant_criteria`. A
+    merchant argument below replaces it in both fields: the new condition is
+    stored as `merchant_name_criteria` and `merchant_criteria` is cleared.
+
     Args:
-        rule_id: The ID of the rule to update (use get_transaction_rules to find IDs)
-        merchant_criteria_operator: How to match merchant ("eq", "contains")
-        merchant_criteria_value: Merchant name/pattern to match
-        amount_operator: Amount comparison ("gt", "lt", "eq", "between")
-        amount_value: Amount threshold value
-        amount_is_expense: Whether amount is expense (negative) or income
-        set_category_id: Category ID to assign
-        set_merchant_name: Merchant name to set
-        add_tag_ids: List of tag IDs to add
-        hide_from_reports: Whether to hide from reports
-        review_status: Review status to set
-        account_ids: Limit rule to specific accounts
-        apply_to_existing: Apply changes to existing transactions
+        rule_id: Id of the rule to update (see get_transaction_rules).
+        clear_category: Remove the category action.
+        clear_merchant: Remove the merchant-rename action.
+        clear_tags: Remove all tag actions.
+        clear_goal_link: Remove the goal link.
+        clear_review_status: Remove the review-status action.
+        clear_business_entity: Remove the business-entity action entirely, so
+            the rule no longer touches a transaction's business. Differs from
+            set_business_entity_id="none", which actively marks it personal.
+        merchant_criteria_operator: Operator shared by merchant_criteria_values
+            ("contains" or "eq"). Defaults to "contains".
+        merchant_criteria_value: Single merchant name/pattern to match.
+        merchant_criteria_values: Several merchant values, OR'd together.
+        merchant_criteria: Merchant criteria with a per-value operator, e.g.
+            [{"operator": "contains", "value": "netflix"},
+             {"operator": "eq", "value": "apple"}]. Takes precedence over the
+            two arguments above.
+        original_statement_values: Match against the raw bank statement text
+            instead of the merchant name. Monarch recommends this as the more
+            stable option, since it does not change when a merchant is
+            re-identified.
+        original_statement_operator: Operator shared by the values above.
+        original_statement_criteria: Original-statement criteria with a
+            per-value operator (same shape as merchant_criteria).
+        use_original_statement: Apply merchant criteria to the original
+            statement text rather than the merchant name.
+        amount_operator: "gt", "lt", "eq" or "between".
+        amount_value: Threshold for gt/lt/eq.
+        amount_lower/amount_upper: Bounds when amount_operator="between".
+        amount_is_expense: True for debits, False for credits.
+        set_category_id: Category id to assign (see get_transaction_categories).
+        set_merchant_name: Merchant name to set on matching transactions.
+        add_tag_ids: Tag ids to add (see get_transaction_tags).
+        link_goal_id: Goal id to link matching transactions to. Monarch
+            requires account_ids to be set as well.
+        hide_from_reports: Hide matching transactions from reports.
+        review_status: Review status to set, e.g. "needs_review".
+        set_business_entity_id: Business to assign matching transactions to
+            (id from get_business_entities), or "none" to mark them personal.
+            Replaces any existing business-entity action.
+        account_ids: Restrict the rule to these accounts. This is a matching
+            criterion, not an action.
+        category_ids: Restrict the rule to transactions already in these
+            categories. Also a matching criterion.
+        apply_to_existing: Also apply the rule to existing transactions.
 
     Returns:
-        Result of rule update.
+        JSON describing whether the update was applied.
     """
     try:
+        if set_merchant_name is not None:
+            require_nonblank(set_merchant_name, "set_merchant_name")
+        if set_business_entity_id is not None and clear_business_entity:
+            raise ValueError(
+                "Pass set_business_entity_id or clear_business_entity, not both."
+            )
+        new_business_action = (
+            _business_entity_action(set_business_entity_id)
+            if set_business_entity_id is not None else None
+        )
+
         client = await get_monarch_client()
+
+        existing = await _fetch_rule(client, rule_id)
+        if existing is None:
+            return json_success({
+                "success": False,
+                "message": f"No transaction rule found with id {rule_id}",
+            })
+
+        merchant = _build_criteria(
+            merchant_criteria_values,
+            merchant_criteria_value,
+            merchant_criteria_operator,
+            merchant_criteria,
+        )
+        statement = _build_criteria(
+            original_statement_values,
+            None,
+            original_statement_operator,
+            original_statement_criteria,
+        )
+        amount = _build_amount_criteria(
+            amount_operator, amount_value, amount_is_expense,
+            amount_lower, amount_upper,
+        )
+
+        # Fall back to the rule's current criteria so the mutation is never
+        # criteria-less. Criteria that are omitted entirely are preserved by
+        # the API, so only these need resending.
+        #
+        # An explicit merchant argument is sent in place of the stored merchant
+        # condition, whichever field holds it. Resending the old condition next
+        # to it would AND it back in. Leaving the legacy field out is not
+        # enough either: the API keeps an omitted merchantCriteria, so a rule
+        # that has one is sent an empty list to clear it (verified live).
+        legacy_merchant: List[Dict[str, Any]] = []
+        clear_legacy_merchant = False
+        if merchant is None:
+            merchant, legacy_merchant = _existing_merchant_criteria(existing)
+        elif existing.get("merchantCriteria"):
+            clear_legacy_merchant = True
+        if statement is None:
+            statement = _criteria_to_input(existing.get("originalStatementCriteria"))
+        if amount is None and existing.get("amountCriteria"):
+            current = existing["amountCriteria"]
+            value_range = current.get("valueRange")
+            amount = {
+                "operator": current.get("operator"),
+                "isExpense": current.get("isExpense"),
+                "value": current.get("value"),
+                "valueRange": (
+                    {"lower": value_range.get("lower"),
+                     "upper": value_range.get("upper")}
+                    if value_range else None
+                ),
+            }
 
         rule_input: Dict[str, Any] = {
             "id": rule_id,
             "applyToExistingTransactions": apply_to_existing,
         }
+        if merchant:
+            rule_input["merchantNameCriteria"] = merchant
+        if legacy_merchant:
+            rule_input["merchantCriteria"] = legacy_merchant
+        elif clear_legacy_merchant:
+            rule_input["merchantCriteria"] = []
+        if statement:
+            rule_input["originalStatementCriteria"] = statement
+        if amount:
+            rule_input["amountCriteria"] = amount
+        # Remaining criteria, carried forward on the same principle.
+        if account_ids is not None:
+            rule_input["accountIds"] = account_ids
+        elif existing.get("accountIds"):
+            rule_input["accountIds"] = existing["accountIds"]
+        if category_ids is not None:
+            rule_input["categoryIds"] = category_ids
+        elif existing.get("categoryIds"):
+            rule_input["categoryIds"] = existing["categoryIds"]
 
-        # Accept either a single merchant value or a list of values. When a
-        # list is given, build one criterion per value sharing the operator
-        # (defaults to "contains"). This lets one rule match many merchants.
-        _merchant_op = merchant_criteria_operator or "contains"
-        _merchant_values = [v for v in (merchant_criteria_values or []) if v]
-        if not _merchant_values and merchant_criteria_value:
-            _merchant_values = [merchant_criteria_value]
-        if _merchant_values:
-            rule_input["merchantNameCriteria"] = [
-                {"operator": _merchant_op, "value": v} for v in _merchant_values
+        # The same criteria create_transaction_rule accepts as enough for a
+        # rule. Refuse only when the input would carry none of them.
+        if not any(rule_input.get(field) for field in (
+            "merchantNameCriteria", "originalStatementCriteria",
+            "amountCriteria", "accountIds", "categoryIds",
+        )):
+            return json_success({
+                "success": False,
+                "message": (
+                    "This rule has no merchant, statement, amount, account or "
+                    "category criteria to resend, and Monarch ignores updates "
+                    "that carry none. Pass criteria explicitly to update it."
+                ),
+            })
+
+        if use_original_statement is not None:
+            rule_input["merchantCriteriaUseOriginalStatement"] = use_original_statement
+        elif existing.get("merchantCriteriaUseOriginalStatement") is not None:
+            rule_input["merchantCriteriaUseOriginalStatement"] = existing[
+                "merchantCriteriaUseOriginalStatement"
             ]
 
-        if amount_operator and amount_value is not None:
-            rule_input["amountCriteria"] = {
-                "operator": amount_operator,
-                "isExpense": amount_is_expense,
-                "value": amount_value,
-                "valueRange": None,
+        # Actions. Monarch CLEARS any action missing from the input -- unlike
+        # criteria, which it preserves -- so every action must be resent on
+        # every update or it is silently destroyed. An unset argument means
+        # "keep current"; the clear_* flags are the only way to remove one.
+        existing_tags = [
+            t.get("id") for t in (existing.get("addTagsAction") or []) if t.get("id")
+        ]
+        # setMerchantAction is written as a NAME, not an id. Passing the id
+        # creates a second merchant literally named with that id string.
+        merchant = (
+            None if clear_merchant
+            else (set_merchant_name
+                  or (existing.get("setMerchantAction") or {}).get("name"))
+        )
+        category = (
+            None if clear_category
+            else (set_category_id
+                  or (existing.get("setCategoryAction") or {}).get("id"))
+        )
+        tags = (
+            None if clear_tags
+            else (add_tag_ids if add_tag_ids is not None else existing_tags)
+        )
+        goal = (
+            None if clear_goal_link
+            else (link_goal_id or (existing.get("linkGoalAction") or {}).get("id"))
+        )
+        hide = (
+            hide_from_reports if hide_from_reports is not None
+            else existing.get("setHideFromReportsAction")
+        )
+        review = (
+            None if clear_review_status
+            else (review_status or existing.get("reviewStatusAction"))
+        )
+
+        if category:
+            rule_input["setCategoryAction"] = category
+        if merchant:
+            rule_input["setMerchantAction"] = merchant
+        if tags:
+            rule_input["addTagsAction"] = tags
+        if goal:
+            rule_input["linkGoalAction"] = goal
+        if hide is not None:
+            rule_input["setHideFromReportsAction"] = hide
+        if review:
+            rule_input["reviewStatusAction"] = review
+
+        # The business-entity action is one of two mutually exclusive fields
+        # (a business id, or "unassigned" = personal), so it is merged as a
+        # pair rather than field by field.
+        if new_business_action is not None:
+            rule_input.update(new_business_action)
+        elif not clear_business_entity:
+            if (existing.get("actionSetBusinessEntity") or {}).get("id"):
+                rule_input["actionSetBusinessEntity"] = existing[
+                    "actionSetBusinessEntity"]["id"]
+            elif existing.get("actionSetBusinessEntityIsUnassigned"):
+                rule_input["actionSetBusinessEntityIsUnassigned"] = True
+
+        # Plan-gated and less common fields. These are carried forward but not
+        # exposed as arguments: owner fields require household collaboration,
+        # so on most accounts they are simply absent and these lines are no-ops.
+        for field in ("sendNotificationAction", "setLinkToPaydownBudgetAction",
+                      "actionSetOwnerIsJoint",
+                      "criteriaOwnerIsJoint", "criteriaBusinessEntityIsUnassigned"):
+            if existing.get(field):
+                rule_input[field] = existing[field]
+        for field in ("criteriaOwnerUserIds", "criteriaBusinessEntityIds"):
+            if existing.get(field):
+                rule_input[field] = existing[field]
+        if (existing.get("actionSetOwner") or {}).get("id"):
+            rule_input["actionSetOwner"] = existing["actionSetOwner"]["id"]
+        # Savings goals are a separate collection from goalsV2 with their own
+        # ids, so linkGoalAction and linkSavingsGoalAction are not interchangeable.
+        if (existing.get("linkSavingsGoalAction") or {}).get("id"):
+            rule_input["linkSavingsGoalAction"] = existing[
+                "linkSavingsGoalAction"]["id"]
+        # Monarch rejects needs_review_by_user_action without a review status,
+        # so the pair has to travel together.
+        reviewer = (existing.get("needsReviewByUserAction") or {}).get("id")
+        if reviewer and rule_input.get("reviewStatusAction"):
+            rule_input["needsReviewByUserAction"] = reviewer
+        split = existing.get("splitTransactionsAction")
+        if split and split.get("splitsInfo"):
+            rule_input["splitTransactionsAction"] = {
+                "amountType": split.get("amountType"),
+                "splitsInfo": [
+                    {k: v for k, v in info.items() if k != "__typename"}
+                    for info in split["splitsInfo"]
+                ],
             }
-
-        if account_ids:
-            rule_input["accountIds"] = account_ids
-
-        if set_category_id:
-            rule_input["setCategoryAction"] = set_category_id
-        if set_merchant_name:
-            rule_input["setMerchantAction"] = set_merchant_name
-        if add_tag_ids:
-            rule_input["addTagsAction"] = add_tag_ids
-        if hide_from_reports is not None:
-            rule_input["setHideFromReportsAction"] = hide_from_reports
-        if review_status:
-            rule_input["reviewStatusAction"] = review_status
 
         result = await client.gql_call(
             operation="Common_UpdateTransactionRuleMutationV2",
@@ -392,11 +945,16 @@ async def update_transaction_rule(
             variables={"input": rule_input},
         )
 
-        errors = result.get("updateTransactionRuleV2", {}).get("errors")
+        payload = result.get("updateTransactionRuleV2") or {}
+        errors = _meaningful_errors(payload.get("errors"))
         if errors:
             return json_success({"success": False, "errors": errors})
 
-        return json_success({"success": True, "message": "Rule updated successfully"})
+        return json_success({
+            "success": True,
+            "rule_id": rule_id,
+            "message": "Rule updated successfully",
+        })
     except Exception as e:
         return json_error("update_transaction_rule", e)
 
@@ -421,20 +979,201 @@ async def delete_transaction_rule(rule_id: str) -> str:
             variables={"id": rule_id},
         )
 
-        # Monarch's deleteTransactionRule can return a payload where the
-        # `deleted` flag is absent/null even when the deletion succeeded, which
-        # previously produced a false "Unknown error". Treat an explicit errors
-        # payload (or deleted == False) as failure; otherwise the mutation was
-        # accepted and the rule is gone.
+        # Monarch's deleteTransactionRule returns an unreliable `deleted` flag:
+        # verified against the live API, it comes back `false` even when the rule
+        # was in fact removed (and it is sometimes absent entirely). Trusting it
+        # made every successful deletion report failure.
+        #
+        # A genuine failure does not arrive in this payload at all -- deleting a
+        # non-existent rule raises TransportQueryError ("Not found") from the
+        # GraphQL layer, which the except block below turns into an error result.
+        # So the only in-payload failure signal worth honouring is an explicit
+        # `errors` object.
         delete_result = result.get("deleteTransactionRule") or {}
 
         errors = delete_result.get("errors")
         if errors:
             return json_success({"success": False, "errors": errors})
 
-        if delete_result.get("deleted") is False:
-            return json_success({"success": False, "message": "Rule was not deleted"})
-
         return json_success({"success": True, "message": "Rule deleted successfully"})
     except Exception as e:
         return json_error("delete_transaction_rule", e)
+
+
+# No `errors` selection here, unlike the create/update/delete rule mutations.
+# One was added by analogy with them, and from then on every reorder failed
+# against the live API with "Something went wrong while processing: None on
+# request_id: None." located at line 8, column 5 of the document gql sends
+# (print_ast output), which is exactly that `errors` selection. The error had
+# no `path`, which points to document validation rather than execution, and
+# Monarch masks unknown-field errors this way (see goals.py), so the payload
+# type most likely has no `errors` field. Other clients that send this
+# mutation select only transactionRules. Do not add `errors` back without
+# re-testing against the live API. With no errors object to read, the tool
+# confirms a move from the returned rule order instead.
+REORDER_RULE_MUTATION = gql("""
+mutation Web_UpdateRuleOrderMutation($id: ID!, $order: Int!) {
+  updateTransactionRuleOrderV2(id: $id, order: $order) {
+    transactionRules {
+      id
+      order
+      __typename
+    }
+    __typename
+  }
+}
+""")
+
+_REORDER_WORKAROUND = (
+    "Reorder the rule by hand in Monarch's rules settings instead. "
+    "Alternatively, Monarch adds a newly created rule at the end of the order, "
+    "so re-creating this rule with create_transaction_rule and then deleting "
+    "the original with delete_transaction_rule moves it to the end. Only do "
+    "that with the user's agreement: the copy gets a new id, and any setting "
+    "create_transaction_rule cannot express (for example split, owner or "
+    "business-entity actions) would be lost."
+)
+
+
+def _order_of(rules: List[Dict[str, Any]], rule_id: str) -> Optional[int]:
+    """Return the order of ``rule_id`` in ``rules``, or None if it is absent."""
+    return next((r.get("order") for r in rules if r.get("id") == rule_id), None)
+
+
+def _reorder_rejected(
+    rule_id: str,
+    new_order: int,
+    current_order: Optional[int],
+    exc: TransportQueryError,
+) -> str:
+    """Explain a reorder that Monarch answered with GraphQL errors.
+
+    gql's message carries only the first error, so the full list is passed
+    through. Each entry's ``locations`` points into the document that was sent,
+    which is what identifies a selection the API does not accept.
+    """
+    logger.warning(
+        f"reorder_transaction_rule was rejected by Monarch: {exc.errors or exc}"
+    )
+    return json_success({
+        "success": False,
+        "tool": "reorder_transaction_rule",
+        "message": (
+            f"Monarch rejected the request to move rule {rule_id} to position "
+            f"{new_order}, so the move was not confirmed. Check "
+            "get_transaction_rules for the current order before retrying."
+        ),
+        "rule_id": rule_id,
+        "requested_order": new_order,
+        "current_order": current_order,
+        "errors": exc.errors or [format_exception(exc)],
+        "workaround": _REORDER_WORKAROUND,
+    })
+
+
+@mcp.tool()
+async def reorder_transaction_rule(rule_id: str, new_order: int) -> str:
+    """
+    Move a transaction rule to a new position in the evaluation order.
+
+    Order is not cosmetic. Every matching rule runs, in order, and a later rule
+    overwrites an earlier one, so position decides which rule wins when two
+    match the same transaction.
+
+    Monarch renumbers the other rules automatically; the full resulting order
+    is returned so the caller can confirm the outcome.
+
+    Args:
+        rule_id: Rule to move (see get_transaction_rules).
+        new_order: Zero-based target position. 0 runs first. A position past
+            the end moves the rule to the end.
+
+    Returns:
+        On success, moved_from, moved_to (read back from Monarch, not echoed)
+        and the resulting order of every rule. On failure, success is false
+        with the rule id, the requested and current positions, Monarch's
+        errors when it gave any, and a suggested workaround.
+    """
+    try:
+        if new_order < 0:
+            return json_success({
+                "success": False, "message": "new_order must be 0 or greater",
+            })
+        client = await get_monarch_client()
+
+        before = await _fetch_rules(client)
+        existing = next((r for r in before if r.get("id") == rule_id), None)
+        if existing is None:
+            return json_success({
+                "success": False,
+                "message": f"No transaction rule found with id {rule_id}",
+            })
+        moved_from = existing.get("order")
+
+        # Monarch stores an out-of-range order as given rather than moving the
+        # rule to the end: checked live, a rule sent 85 with 81 rules was left
+        # at 85, a gap in the numbering. Cap the target at the last position.
+        target = min(new_order, len(before) - 1)
+
+        try:
+            result = await client.gql_call(
+                operation="Web_UpdateRuleOrderMutation",
+                graphql_query=REORDER_RULE_MUTATION,
+                variables={"id": rule_id, "order": target},
+            )
+        except TransportQueryError as e:
+            return _reorder_rejected(rule_id, new_order, moved_from, e)
+
+        payload = result.get("updateTransactionRuleOrderV2") or {}
+        rules = payload.get("transactionRules") or []
+
+        # Read the landed position back rather than echoing the argument, so
+        # the reported outcome is what Monarch actually did. The payload has no
+        # errors object, so this read-back is the only evidence the move took.
+        # If the response leaves the rule out, ask for the full list again.
+        landed = _order_of(rules, rule_id)
+        if landed is None:
+            rules = await _fetch_rules(client)
+            landed = _order_of(rules, rule_id)
+        if landed is None:
+            return json_success({
+                "success": False,
+                "rule_id": rule_id,
+                "requested_order": new_order,
+                "message": (
+                    f"Could not confirm the move: rule {rule_id} was missing "
+                    "from Monarch's rule list after the request. Check "
+                    "get_transaction_rules."
+                ),
+            })
+
+        # Rule order decides which rule wins when two match the same
+        # transaction, so a silently ignored reorder must not read as done.
+        if landed == moved_from != target:
+            return json_success({
+                "success": False,
+                "tool": "reorder_transaction_rule",
+                "message": (
+                    f"Monarch accepted the request to move rule {rule_id} to "
+                    f"position {target}, but the rule is still at position "
+                    f"{moved_from}."
+                ),
+                "rule_id": rule_id,
+                "requested_order": new_order,
+                "current_order": landed,
+                "workaround": _REORDER_WORKAROUND,
+            })
+
+        return json_success({
+            "success": True,
+            "rule_id": rule_id,
+            "moved_from": moved_from,
+            "moved_to": landed,
+            "requested_order": new_order,
+            "order": [
+                {"rule_id": r.get("id"), "order": r.get("order")}
+                for r in sorted(rules, key=lambda r: r.get("order") or 0)
+            ],
+        })
+    except Exception as e:
+        return json_error("reorder_transaction_rule", e)

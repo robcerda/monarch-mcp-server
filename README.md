@@ -14,7 +14,11 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
 
 ## 🚀 Quick Start
 
-### 1. Installation
+If you plan to use this MCP server locally / on the same computer as Claude Desktop or similar, start with the [`Local Installation` section](#1-local-installation).
+
+For other deployment scenarios - like containerized deployment or cloud hosting - start with the [`Containerized Deployment` section](#containerized-deployment).
+
+### 1. Local Installation
 
 1. **Clone this repository**:
    ```bash
@@ -24,16 +28,31 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
 
 2. **Install dependencies**:
 
-   **Using `pip`**:
+   **Using `uv`** (recommended):
    ```bash
-   pip install -r requirements.txt
-   pip install -e .
+   uv sync --locked
    ```
 
-   **Using `uv`** (alternative):
+   `--locked` installs exactly what `uv.lock` pins, verified against the
+   hashes it records, and refuses to re-resolve. Without it, `uv sync` is free
+   to pick up whatever versions happen to satisfy the ranges today.
+
+   **Using `pip`**:
    ```bash
-   uv sync
+   pip install -r requirements-lock.txt --require-hashes
+   pip install -e . --no-deps
    ```
+
+   `requirements-lock.txt` is generated from `uv.lock` and pins every transitive
+   dependency with hashes, so `--require-hashes` gives the pip path the same
+   guarantee as the uv one. `--no-deps` on the second command stops pip
+   re-resolving what the first command just pinned.
+
+   `pip install -r requirements.txt` still works and installs exactly the same
+   set. That file is now a one line include of `requirements-lock.txt`, kept so
+   existing setups and scripts do not break. The pins moved out of it because a
+   root `requirements.txt` gets resolved as an independent manifest, which had
+   started producing a pinned set that disagreed with `uv.lock`.
 
 3. **Configure Claude Desktop**:
    Add this to your Claude Desktop configuration file:
@@ -49,13 +68,10 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
          "command": "/opt/homebrew/bin/uv",
          "args": [
            "run",
-           "--with",
-           "mcp[cli]",
-           "--with-editable",
+           "--locked",
+           "--project",
            "/path/to/your/monarch-mcp-server",
-           "mcp",
-           "run",
-           "/path/to/your/monarch-mcp-server/src/monarch_mcp_server/server.py"
+           "monarch-mcp-server"
          ]
        }
      }
@@ -63,6 +79,18 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
    ```
 
    **Important**: Replace `/path/to/your/monarch-mcp-server` with your actual path!
+
+   `uv run --locked --project` resolves dependencies from the repo's
+   `uv.lock`, and `monarch-mcp-server` is the console script declared in
+   `pyproject.toml`. `--locked` matters: without it, a lockfile that has
+   drifted from `pyproject.toml` is silently re-resolved against PyPI and the
+   recorded hashes stop being enforced. With it, drift is a startup error.
+   Earlier versions of this README used `uv run --with 'mcp[cli]'`, which
+   builds a fresh unpinned environment on every launch and silently picks up
+   whatever the newest release happens to be. That is what broke every install
+   when the MCP SDK published 2.0, and the client only reported it as the
+   server disconnecting. Pinning the launch to the lockfile means a new
+   upstream release cannot change what your server runs.
 
 4. **Restart Claude Desktop**
 
@@ -84,13 +112,10 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
          "command": "/opt/homebrew/bin/uv",
          "args": [
            "run",
-           "--with",
-           "mcp[cli]",
-           "--with-editable",
+           "--locked",
+           "--project",
            "/path/to/your/monarch-mcp-server",
-           "mcp",
-           "run",
-           "/path/to/your/monarch-mcp-server/src/monarch_mcp_server/server.py"
+           "monarch-mcp-server"
          ]
        }
      }
@@ -107,13 +132,10 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
        "command": "/opt/homebrew/bin/uv",
        "args": [
          "run",
-         "--with",
-         "mcp[cli]",
-         "--with-editable",
+         "--locked",
+         "--project",
          "/path/to/your/monarch-mcp-server",
-         "mcp",
-         "run",
-         "/path/to/your/monarch-mcp-server/src/monarch_mcp_server/server.py"
+         "monarch-mcp-server"
        ]
      }
    }
@@ -152,9 +174,35 @@ Long-lived sessions, supports SSO accounts, and sidesteps Cloudflare CAPTCHA gat
 2. Open DevTools (F12) → Network tab.
 3. Click any request whose Name starts with `graphql` (or any request to `api.monarch.com`).
 4. Scroll to Request Headers, find the `cookie:` header, and copy the full value.
-5. Paste it into the prompt.
+5. Save it to the cookie file for your platform (recommended), then re-run the script — it reads the file automatically:
 
-The script verifies the cookies against the live API before saving them to your system keyring.
+   **macOS / Linux** — `~/.config/monarch-mcp/cookie.txt` (respects `$XDG_CONFIG_HOME`):
+
+   ```bash
+   mkdir -p ~/.config/monarch-mcp
+   # paste the cookie value into the file with your editor, then:
+   chmod 600 ~/.config/monarch-mcp/cookie.txt
+   ```
+
+   **Windows** — `%APPDATA%\monarch-mcp\cookie.txt`:
+
+   ```powershell
+   New-Item -ItemType Directory -Force "$env:APPDATA\monarch-mcp" | Out-Null
+   notepad "$env:APPDATA\monarch-mcp\cookie.txt"   # paste the cookie value, save, close
+   ```
+
+   Files under your user profile are already ACL-restricted to your account on Windows; no `chmod` equivalent is needed for typical single-user machines.
+
+   To use a different location on any platform, set the `MONARCH_MCP_COOKIE_FILE` environment variable to the full path.
+
+   Alternatively, paste the value at the interactive prompt — but note that
+   POSIX terminals silently truncate pasted input at the canonical-mode
+   buffer limit (`MAX_CANON`, 1024 bytes on macOS/Linux), and real Monarch
+   cookie headers are usually longer than that, so the prompt path fails
+   with a confusing auth error for most users. The cookie file has no
+   length limit and survives repo updates.
+
+The script verifies the cookies against the live API before saving them to your system keyring. The cookie file is only read at setup time; the running MCP server uses the keyring session.
 
 #### Option 2: Email and password
 
@@ -173,10 +221,179 @@ Kept for users with an existing token captured before the May 2026 API change. M
 ### 3. Start Using
 
 Once authenticated, use these tools directly in Claude Desktop or Claude Code:
+
 - `get_accounts` - View all your financial accounts
 - `get_transactions` - Recent transactions with filtering
 - `get_budgets` - Budget information and spending
 - `get_cashflow` - Income/expense analysis
+
+## Containerized Deployment
+
+The Docker image uses Astral's uv/Python 3.12 slim base, installs from `uv.lock`,
+and defaults to HTTP on `0.0.0.0:8000` inside the container.
+
+### Build the image
+
+```bash
+docker build -t monarch-mcp-server .
+```
+
+### Authenticate
+
+Authenticate once using a persistent session volume:
+
+```bash
+docker run --rm -it \
+  -v monarch-session:/home/app/.monarch-mcp-server \
+  monarch-mcp-server python login_setup.py
+```
+
+The login script supports a cookie file for browser-cookie authentication.
+To use it, also mount your cookie file at `/tmp/monarch-cookie.txt:ro` and set `MONARCH_MCP_COOKIE_FILE=/tmp/monarch-cookie.txt` for the login container.
+
+The file must be readable by the container's uid `10001`, which conflicts with
+the `chmod 600` advised for the local flow: a 0600 file owned by your host user
+is not readable by uid 10001 inside the container. For the container login,
+either `chown 10001 cookie.txt` and keep it at 0600, or run the login container
+with `--user $(id -u)` so it reads the file as you. Do not widen it to 0644.
+Delete the file once the login has succeeded.
+
+Once saved, the session volume is sufficient for normal server launches.
+
+> [!IMPORTANT]
+> **The session is stored unencrypted in that volume.** This differs from a
+> local install, and the difference is easy to miss.
+>
+> On macOS and Windows the session goes to the system keyring. A container has
+> no keyring backend, so storage falls back to a file. That file is encrypted
+> at rest only on Windows, through DPAPI, so in a Linux container it holds your
+> Monarch session in plaintext. Permissions are as tight as a file can be, mode
+> 0600 inside a 0700 directory owned by uid 10001, but file permissions do not
+> help against anyone who can reach the volume from outside the container.
+>
+> Treat `monarch-session` as a secret. It can be read by root on the Docker
+> host, by any user in the `docker` group, by any other container that mounts
+> the same volume, by `docker cp` and `docker exec`, and by anything that backs
+> up `/var/lib/docker`. A Monarch session grants full read and write access to
+> your accounts and does not expire on its own, so a copy of this volume is a
+> lasting credential. Back it up only to somewhere you would keep a password,
+> and delete the volume with `docker volume rm monarch-session` when you are
+> done with it.
+>
+> The cookie file described below is the same kind of secret. Delete it once
+> the login has succeeded; it is only needed for that one run.
+
+### Start the HTTP server
+
+Reuse the session volume when starting the server:
+
+```bash
+$ docker run -d --name monarch-mcp --restart unless-stopped \
+  -p 127.0.0.1:8000:8000 \
+  -v monarch-session:/home/app/.monarch-mcp-server \
+  monarch-mcp-server
+```
+
+Connect your MCP client to `http://127.0.0.1:8000/mcp` using Streamable HTTP.
+See [HTTP transport configuration](#http-transport-configuration) for all settings.
+
+The image runs in [read only mode](#strongest-option-read-only-mode) by default,
+because the HTTP transport does not authenticate callers. Anything that can
+reach the port would otherwise be able to call `monarch_logout`, or
+`monarch_login_with_token` to swap your saved session for another Monarch
+account. Login happens in the separate `login_setup.py` container above, so the
+running server never needs those tools.
+
+To allow writes, add `-e MONARCH_MCP_READ_ONLY=0`. That registers every
+mutating tool, including the login and logout tools, on the listening socket,
+so only do it where every client that can reach the port is trusted.
+
+### Connect from another machine
+
+> [!WARNING]
+> This MCP server is not multi-user or multi-account. All connected clients share the same session and permissions.
+> Ensure that you understand the security implications before exposing the server to a network.
+
+To connect from another machine, **put the container behind an authenticated HTTPS reverse proxy or a private network with access controls**, publish the port on the appropriate interface, and allow the hostname used by the client:
+
+```bash
+docker run -d --name monarch-mcp --restart unless-stopped \
+  -p 127.0.0.1:8000:8000 \
+  -e MONARCH_MCP_ALLOWED_HOSTS=mcp.example.com \
+  -v monarch-session:/home/app/.monarch-mcp-server \
+  monarch-mcp-server
+```
+
+Here a reverse proxy on the Docker host forwards `https://mcp.example.com/mcp` to `http://127.0.0.1:8000/mcp`, preserving the public Host header.
+
+The proxy must support streaming responses without buffering.
+For direct access on a private network, allow the client's Host value including the port, such as `server.lan:8000`.
+
+Let me stress this point: **This is a single-account server!**
+All connected clients share the *same* saved Monarch session and permissions, including enabled write tools.
+Basic Host/origin checks protect against DNS rebinding; they do not authenticate callers.
+Use one server and session volume per Monarch account if you need to.
+
+### Use STDIO instead
+
+To run the Docker image over STDIO instead:
+
+```bash
+docker run --rm -i \
+  -e MONARCH_MCP_TRANSPORT=stdio \
+  -v monarch-session:/home/app/.monarch-mcp-server \
+  monarch-mcp-server
+```
+
+## HTTP Transport Configuration
+
+The server supports MCP Streamable HTTP at `/mcp` but only when explicitly selected:
+
+```bash
+uv run --locked monarch-mcp-server --transport http --host 127.0.0.1 --port 8000
+```
+
+Connect an MCP client using Streamable HTTP to `http://127.0.0.1:8000/mcp`.
+
+| Setting                            | CLI flag                        | Environment variable                            | Default outside Docker                         |
+| ---------------------------------- | ------------------------------- | ----------------------------------------------- | ---------------------------------------------- |
+| Transport                          | `--transport`                   | `MONARCH_MCP_TRANSPORT`                         | `stdio` (`http` aliases `streamable-http`)     |
+| Listen address                     | `--host`                        | `MONARCH_MCP_HOST`                              | `127.0.0.1`                                    |
+| Listen port                        | `--port`                        | `MONARCH_MCP_PORT`                              | `8000`                                         |
+| Additional allowed Host headers    | `--allowed-host` (repeatable)   | `MONARCH_MCP_ALLOWED_HOSTS` (comma-separated)   | None; loopback hosts are always allowed        |
+| Additional allowed browser Origins | `--allowed-origin` (repeatable) | `MONARCH_MCP_ALLOWED_ORIGINS` (comma-separated) | None; HTTP loopback origins are always allowed |
+
+CLI flags override their environment settings.
+
+A Host given without a port also allows that host with any port, so
+`--allowed-host mcp.example.com` accepts both `mcp.example.com` and
+`mcp.example.com:8443`. Give a host with a port, such as
+`--allowed-host mcp.example.com:8443`, to allow only that port. Values are
+matched lowercased, with a trailing dot ignored.
+Host entries include the port when clients send one; `server.lan:*` allows any port.
+Origin entries include the scheme, for example `https://client.example.com`.
+Clients without an Origin header are supported.
+Browser clients may additionally require CORS handling at the reverse proxy.
+
+## Meta Muse
+
+Works great with Meta Muse, Meta's AI assistant, alongside Claude Desktop and
+Claude Code. Muse speaks MCP, so it connects the same way as any other client:
+give it the stdio launch command from the installation section, or point it at
+the Streamable HTTP endpoint if you are running the container.
+
+Using Muse? Ask it to install this server from this repo. Muse can handle the
+install and register the server with itself, but authentication is a step only
+you can do: run login_setup.py once and paste a browser cookie, or enter your
+password and MFA. After that, ask Muse to list your Monarch accounts to confirm
+it is working.
+
+Check out Muse, your personal AI agent. Redeem my code in Settings within 48
+hours of joining and we'll both get 1 billion Muse tokens.
+
+Code: O63W0U
+
+https://muse.ai/join
 
 ## ✨ Features
 
@@ -220,9 +437,56 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 - **Update Transaction Rule**: Modify existing rules
 - **Delete Transaction Rule**: Remove a rule
 
+### Recurring forecasts and synced bills
+
+`get_recurring_transactions()` includes merchant forecasts **and synced liability
+bills** (such as credit cards and loans). Set `include_liabilities=False` to
+request only merchant recurring items. Omit both dates for the current calendar
+month, or provide both `start_date` and `end_date` in `YYYY-MM-DD` format.
+
+The default response remains a JSON list with the existing merchant fields.
+Each item also exposes `account_id`, `category_id`, `amount_diff`, and the stream's
+`name` and `merchant_id`. A liability item can have a null merchant. Its
+`stream.credit_report_liability_account` contains the liability `id`, linked
+`account_id`/`account` name, and `last_statement` with `id`, `due_date`,
+`bill_amount`, `minimum_payment_amount`, `payment_status`, and `remaining_balance`.
+Missing statements and unknown balances stay null; paid balances stay zero.
+
+**These are not interchangeable amounts.** The item's `amount` and stream's
+`amount` are recurring forecasts. `last_statement.bill_amount` is the original
+synced statement amount; `remaining_balance` is the remaining synced statement
+balance. The latest statement's due date can differ from the forecast item's
+`date`. Payment status is returned as supplied by Monarch, not inferred. These
+values reflect the latest sync, not a guaranteed real-time amount owed.
+
+Merchant forecasts and liability bills can describe the same payment. The tool
+preserves both with their identities: it does not sum, deduplicate, or substitute
+forecast amounts for unknown statement balances.
+
+Monarch ignores `limit` and `offset` on this query, so the tool fetches the whole
+range once and applies them itself. With `limit` omitted the default list is the
+whole month. Pass `limit` to return a single page, and use `include_metadata=True`
+to opt into the standard envelope
+(`data`, `args`, `count`, `total_count`, `truncated`, `tool`, `search`):
+
+```python
+get_recurring_transactions(
+    start_date="2026-02-01", end_date="2026-02-28",
+    include_liabilities=True, limit=100, offset=0, include_metadata=True,
+)
+```
+
+`total_count` is the number of items in the range, and `truncated` is true while
+items remain past the returned page. Keep the dates and filters fixed, advance
+`offset` by `count`, and continue until `truncated=False`.
+
+Synced bills require bill sync to be available and configured in Monarch; the
+tool does not enable it or refresh institutions.
+
 ### 🔄 Merchant & Recurring Stream Management
 - **Get Merchant**: View a merchant's details including recurring transaction stream configuration
 - **Update Merchant**: Modify a merchant's name and/or recurring stream settings (frequency, amount, base date)
+- **Merge Merchants**: Move one merchant's transactions to another and delete the source, which cannot be undone
 - **Review Recurring Stream**: Accept, ignore, or reset recurring transaction streams detected by Monarch
 
 ### ✂️ Transaction Splits
@@ -230,10 +494,8 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 - **Split Transaction**: Divide a single transaction into multiple parts with different categories or merchants
 
 ### 💵 Budget Management
-- **Get Budgets**: Budget information by category (including rollover and set-aside), the all-up **Flexible** bucket, category-group roll-ups, savings-goal contributions, the account's budget system, and per-month income / expense / fixed / flexible / non-monthly totals
+- **Get Budgets**: Access budget information including spent amounts and remaining balances by category
 - **Set Budget Amount**: Create or modify budget amounts for any category or category group
-- **Set Flexible Budget**: Set the bucket-level Flexible amount used by Monarch's "fixed_and_flex" budget system
-- **Update Flex Rollover Settings**: Start a fresh Flex rollover period, for buckets that have accumulated a large negative rollover
 
 ### 📈 Net Worth Tracking
 - **Get Net Worth**: Track total net worth over time with daily snapshots and trend analysis
@@ -255,49 +517,80 @@ Once authenticated, use these tools directly in Claude Desktop or Claude Code:
 
 ## 🛠️ Available Tools
 
+All 68 registered tools. Required parameters are listed first, optional ones
+are marked with a trailing question mark. This table is generated from the
+live tool registry and the functions' signatures, so it does not drift.
+
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `setup_authentication` | Get setup instructions | None |
-| `check_auth_status` | Check authentication status | None |
-| `get_accounts` | Get all financial accounts | None |
-| `get_transactions` | Get transactions with filtering and reconciliation fields | `limit`, `offset`, `start_date`, `end_date`, `account_id`, `account_ids`, `category_ids`, `category_group_ids`, `tag_ids`, `search`, `wide_search`, `search_scan_limit`, `has_notes`, `is_split`, `is_recurring` |
-| `get_budgets` | Get budget information, including the Flexible bucket | `start_date`, `end_date` (pass both or neither) |
-| `set_budget_amount` | Set budget for a category | `amount`, `category_id`, `category_group_id`, `start_date`, `apply_to_future` |
-| `set_flexible_budget` | Set the all-up Flexible bucket amount | `amount`, `start_date`, `apply_to_future` |
-| `update_flex_rollover_settings` | Start a new Flex rollover period (**discards accumulated rollover**) | `rollover_start_month`, `rollover_starting_balance`, `rollover_enabled` |
-| `get_cashflow` | Get cashflow analysis | `start_date`, `end_date` |
-| `get_net_worth` | Get net worth history | `start_date`, `end_date`, `account_type` |
-| `get_account_balance_history` | Get account balance history | `account_id` |
-| `get_net_worth_by_account_type` | Get net worth by account type | `start_date`, `timeframe` |
-| `get_account_holdings` | Get investment holdings | `account_id` |
-| `create_transaction` | Create new transaction | `account_id`, `amount`, `description`, `date`, `category_id`, `merchant_name` |
-| `update_transaction` | Update existing transaction | `transaction_id`, `amount`, `description`, `category_id`, `date` |
-| `refresh_accounts` | Request account data refresh | `account_ids` (optional — defaults to all active, visible accounts) |
-| `get_categories` | List all transaction categories | None |
-| `get_category_groups` | List category groups with categories | None |
-| `get_transactions_needing_review` | Get transactions needing review | `needs_review`, `days`, `uncategorized`, `no_notes` |
-| `set_transaction_category` | Set category on a transaction | `transaction_id`, `category_id`, `mark_reviewed` |
-| `update_transaction_notes` | Update notes on a transaction | `transaction_id`, `notes` |
-| `mark_transaction_reviewed` | Mark transaction as reviewed | `transaction_id` |
-| `bulk_categorize_transactions` | Categorize multiple transactions | `transaction_ids`, `category_id` |
-| `get_tags` | List all tags | None |
+| `add_transaction_tag` | Add a tag to a transaction, preserving any tags already on it | `transaction_id`, `tag_id` |
+| `bulk_categorize_transactions` | Apply the same category to multiple transactions at once | `transaction_ids`, `category_id`, `mark_reviewed`?, `dry_run`? |
+| `bulk_update_transactions` | Apply the same edit to many transactions in one request | `transaction_ids`, `category_id`?, `merchant_name`?, `notes`?, `goal_id`?, `needs_review`?, `business_entity_id`?, `hide_from_reports`?, `dry_run`? |
+| `categorize_transaction` | Assign a category to a transaction | `transaction_id`, `category_id` |
+| `check_auth_status` | Report the stored session and its auth mode | None |
+| `create_transaction` | Create a new transaction in Monarch Money | `date`, `account_id`, `amount`, `merchant_name`, `category_id`, `notes`?, `update_balance`? |
+| `create_transaction_category` | Create a new transaction category | `group_id`, `transaction_category_name`, `icon`?, `rollover_enabled`?, `rollover_type`? |
+| `create_transaction_category_group` | Create an income/expense group and verify it with a fresh read | `name`, `group_type`?, `dry_run`? |
+| `create_transaction_rule` | Create a new transaction auto-categorization rule | `merchant_criteria_operator`?, `merchant_criteria_value`?, `merchant_criteria_values`?, `merchant_criteria`?, `original_statement_operator`?, `original_statement_values`?, `original_statement_criteria`?, `use_original_statement`?, `amount_operator`?, `amount_value`?, `amount_lower`?, `amount_upper`?, `amount_is_expense`?, `set_category_id`?, `set_merchant_name`?, `add_tag_ids`?, `link_goal_id`?, `hide_from_reports`?, `review_status`?, `set_business_entity_id`?, `account_ids`?, `category_ids`?, `apply_to_existing`? |
+| `create_transaction_tag` | Create a new transaction tag | `name`, `color` |
+| `debug_session_loading` | Diagnose session loading problems | None |
+| `delete_transaction` | Delete a transaction from Monarch Money | `transaction_id` |
+| `delete_transaction_rule` | Delete a transaction rule | `rule_id` |
+| `get_account_balance_history` | Get historical balance data for a specific account | `account_id` |
+| `get_account_holdings` | Get investment holdings for a specific account | `account_id` |
+| `get_account_sync_health` | Report the health of each linked institution connection | `stale_after_days`? |
+| `get_accounts` | Get all financial accounts from Monarch Money | None |
+| `get_budget_summary` | Read category budgets, group budgets, and authoritative monthly totals | `start_date`?, `end_date`? |
+| `get_budgets` | Get budget information from Monarch Money | `start_date`?, `end_date`? |
+| `get_business_entities` | List the business entities on the Monarch account (id and name) | None |
+| `get_cashflow` | Get cashflow analysis from Monarch Money | `start_date`?, `end_date`?, `limit`? |
+| `get_cashflow_by_month` | Get spending trends over time, broken down by category and month | `start_date`, `end_date` |
+| `get_category_details` | Get a single category's details including budget amounts for a month | `category_id`, `month`? |
+| `get_category_group_details` | Read one group's name, categories and group/category budgeting mode | `group_id` |
+| `get_debt_paydown` | Get the debt paydown plan and the accounts feeding it | `method`? |
+| `get_goal_contributions` | Show a goal's budgeted contributions, broken down by funding account | `goal_id`, `month`? |
+| `get_goals` | List Monarch savings and debt-paydown goals | None |
+| `get_household_members` | Get household member IDs, names, display names, and roles | None |
+| `get_merchant` | Get a merchant's details including recurring transaction stream configuration | `merchant_id` |
+| `get_net_worth` | Get net worth history over time | `start_date`?, `end_date`?, `account_type`? |
+| `get_net_worth_by_account_type` | Get net worth breakdown by account type over time | `start_date`, `timeframe`? |
+| `get_recurring_transactions` | Get recurring merchant forecasts and synced liability bills | `start_date`?, `end_date`?, `include_liabilities`?, `limit`?, `offset`?, `include_metadata`? |
+| `get_savings_goal_history` | Show how savings goal balances have changed, up to today | `goal_name`?, `granularity`?, `periods`?, `breakdown`? |
+| `get_spending_summary` | Get a spending summary broken down by category, category group, and merchant | `start_date`?, `end_date`?, `limit`? |
+| `get_transaction_categories` | Get all available transaction categories from Monarch Money | None |
+| `get_transaction_category_groups` | Get all transaction category groups (parent groupings for categories) | None |
+| `get_transaction_details` | Get full details for a specific transaction | `transaction_id` |
+| `get_transaction_rules` | Get all transaction auto-categorization rules from Monarch Money | None |
+| `get_transaction_splits` | Get the splits for a transaction | `transaction_id` |
+| `get_transaction_tags` | Get all available transaction tags from Monarch Money | None |
+| `get_transactions` | Get transactions from Monarch Money | `limit`?, `offset`?, `start_date`?, `end_date`?, `account_id`?, `search`?, `category_ids`?, `category_group_ids`?, `account_ids`?, `tag_ids`?, `has_notes`?, `is_split`?, `is_recurring`?, `wide_search`?, `search_scan_limit`?, `include_hidden`? |
+| `get_transactions_needing_review` | Get transactions that need review based on various criteria | `needs_review`?, `days`?, `uncategorized_only`?, `without_notes_only`?, `limit`?, `offset`?, `account_id`?, `include_hidden`? |
+| `get_transactions_summary` | Get a high-level summary of transactions | None |
+| `mark_transaction_reviewed` | Mark a transaction as reviewed (clears the needs_review flag) | `transaction_id` |
+| `merge_merchants` | Merge one merchant into another, deleting the source. Cannot be undone | `source_merchant_id`, `target_merchant_id` |
+| `monarch_login` | Sign in via a secure form in the client UI | None |
+| `monarch_login_with_token` | Sign in with a browser copied session token | None |
+| `monarch_logout` | Clear the stored session and drop the cached client | None |
+| `monarch_whoami` | Report who is signed in and what the account's plan entitles it to | None |
+| `refresh_accounts` | Request account data refresh from financial institutions | `account_ids`? |
+| `reorder_transaction_rule` | Move a transaction rule to a new position in the evaluation order | `rule_id`, `new_order` |
+| `review_recurring_stream` | Set the review status of a recurring transaction stream | `stream_id`, `review_status` |
+| `search_transactions` | Search and filter transactions with comprehensive filtering options | `search`?, `limit`?, `offset`?, `start_date`?, `end_date`?, `category_ids`?, `account_ids`?, `tag_ids`?, `has_attachments`?, `has_notes`?, `hidden_from_reports`?, `is_split`?, `is_recurring`? |
+| `set_budget_amount` | Set or update a budget amount for a category or category group | `amount`, `category_id`?, `category_group_id`?, `start_date`?, `apply_to_future`? |
+| `set_business_entity` | Set (or clear) the business entity on one transaction | `transaction_id`, `business_entity_id` |
+| `set_goal_contribution` | Set the budgeted monthly contribution to a goal from one funding account | `goal_id`, `account_id`, `amount` |
 | `set_transaction_tags` | Set tags on a transaction | `transaction_id`, `tag_ids` |
-| `create_tag` | Create a new tag | `name`, `color` |
-| `search_transactions` | Search transactions with filters | `search`, `category_ids`, `account_ids`, `tag_ids`, `start_date`, `end_date`, `min_amount`, `max_amount` |
-| `get_transaction_details` | Get details of a transaction | `transaction_id` |
-| `delete_transaction` | Delete a transaction | `transaction_id` |
-| `get_recurring_transactions` | Get recurring transactions | None |
-| `get_transaction_rules` | List auto-categorization rules | None |
-| `create_transaction_rule` | Create an auto-categorization rule | `merchant_criteria_operator`, `merchant_criteria_value`, `set_category_id`, `add_tag_ids`, `amount_operator`, `amount_value` |
-| `update_transaction_rule` | Update an existing rule | `rule_id`, `merchant_criteria_operator`, `merchant_criteria_value`, `set_category_id` |
-| `delete_transaction_rule` | Delete a rule | `rule_id` |
-| `get_merchant` | Get merchant details with recurring stream | `merchant_id` |
-| `update_merchant` | Update merchant name/recurring stream | `merchant_id`, `name`, `is_recurring`, `frequency`, `base_date`, `amount`, `is_active` |
-| `review_recurring_stream` | Set recurring stream review status | `stream_id`, `review_status` |
-| `get_transaction_splits` | Get splits for a transaction | `transaction_id` |
-| `split_transaction` | Split a transaction into parts | `transaction_id`, `splits` (JSON array) |
-| `get_transactions_summary` | Get high-level transaction statistics | None |
-| `get_spending_summary` | Get spending breakdown by category | `start_date`, `end_date`, `limit` |
+| `setup_authentication` | Get setup instructions | None |
+| `split_transaction` | Split a transaction into multiple parts with different categories/merchants | `transaction_id`, `splits` |
+| `update_account` | Update an account's name, balance, type or visibility settings | `account_id`, `name`?, `balance`?, `account_type`?, `account_sub_type`?, `include_in_net_worth`?, `hide_from_summary_list`?, `hide_transactions_from_reports`?, `dry_run`? |
+| `update_category` | Update an existing category's settings | `category_id`, `name`?, `icon`?, `group_id`?, `category_type`?, `exclude_from_budget`?, `budget_variability`?, `rollover_enabled`?, `rollover_start_month`?, `rollover_starting_balance`?, `rollover_frequency`?, `rollover_target_amount`?, `rollover_type`?, `confirm_rollover_reset`?, `dry_run`? |
+| `update_merchant` | Update a merchant's name and/or recurring transaction stream settings | `merchant_id`, `name`?, `is_recurring`?, `frequency`?, `base_date`?, `amount`?, `is_active`? |
+| `update_savings_goal` | Update a savings goal's target or monthly contribution | `goal_id`, `target_amount`?, `target_date`?, `name`?, `priority`?, `goal_type`?, `is_sinking_fund`? |
+| `update_transaction` | Update an existing transaction in Monarch Money | `transaction_id`, `category_id`?, `merchant_name`?, `goal_id`?, `amount`?, `date`?, `hide_from_reports`?, `needs_review`?, `notes`?, `owner_user_id`? |
+| `update_transaction_category_group` | Rename a group and/or switch its group/category budgeting mode | `group_id`, `name`?, `group_level_budgeting_enabled`?, `dry_run`? |
+| `update_transaction_notes` | Update the notes/memo for a transaction | `transaction_id`, `notes`, `receipt_url`? |
+| `update_transaction_rule` | Update an existing transaction rule | `rule_id`, `merchant_criteria_operator`?, `merchant_criteria_value`?, `merchant_criteria_values`?, `merchant_criteria`?, `original_statement_operator`?, `original_statement_values`?, `original_statement_criteria`?, `use_original_statement`?, `amount_operator`?, `amount_value`?, `amount_lower`?, `amount_upper`?, `amount_is_expense`?, `set_category_id`?, `set_merchant_name`?, `add_tag_ids`?, `link_goal_id`?, `hide_from_reports`?, `review_status`?, `set_business_entity_id`?, `account_ids`?, `category_ids`?, `clear_category`?, `clear_merchant`?, `clear_tags`?, `clear_goal_link`?, `clear_review_status`?, `clear_business_entity`?, `apply_to_existing`? |
+| `upload_account_balance_history` | Upload corrected balance snapshots for an account | `account_id`, `corrections`, `dry_run`? |
 
 ## 📝 Usage Examples
 
@@ -311,53 +604,11 @@ Use get_accounts to show me all my financial accounts
 Show me my last 50 transactions using get_transactions with limit 50
 ```
 
-`get_transactions` returns a JSON object with `tool`, `args`, `count`, `total_count`, `truncated`, `search`, and `data` so large `agent-tools/<uuid>.txt` responses are self-describing. Transaction rows live in `data` and include `original_statement` / `plaid_description` when Monarch provides the underlying Plaid statement text, plus `currency`, `direction`, `direction_source`, `transaction_type`, `category_group`, and `category_group_id` when those values can be derived from Monarch response data. When Monarch's server-side `search` errors or returns no rows, `wide_search` scans recent transactions locally across merchant, original statement, description, notes, category, account, and tags.
+`get_transactions` returns a JSON object with `tool`, `args`, `count`, `total_count`, `truncated`, `search`, and `data` so large `agent-tools/<uuid>.txt` responses are self-describing. Transaction rows live in `data` and include `original_statement` / `plaid_description` when Monarch provides the underlying Plaid statement text, plus `currency`, `direction`, `direction_source`, `transaction_type`, `category_group`, and `category_group_id` when those values can be derived from Monarch response data. When Monarch's server-side `search` errors or returns no rows, `wide_search` scans recent transactions locally across merchant, original statement, description, notes, category, account, and tags. Transactions hidden from reports are included by default and carry `hide_from_reports: true`; Monarch's API leaves them out unless asked, so pass `include_hidden=false` only when you want just the transactions Monarch's reports count. `get_transactions_needing_review` takes the same `include_hidden` flag, and `search_transactions` returns both kinds when `hidden_from_reports` is left unset.
 
 ### Check Spending vs Budget
 ```
 Use get_budgets to show my current budget status
-```
-
-`get_budgets` returns a JSON object with `budget_system`, `data` (one row per category per month), `flex`, `groups`, `goals` and `totals`.
-
-**Two things that will produce wrong numbers if ignored:**
-
-1. **Income and expense amounts are both positive magnitudes.** The sign does not distinguish them — negatives appear only for contra entries. Summing `planned` across all `data` rows adds income to spending. Filter on `category_type` (`income` / `expense` / `transfer`) first.
-2. **Under flex budgeting most category rows carry no standalone budget.** Rows whose `budget_variability` is `flexible` are pooled into the single Flexible bucket, so their individual `planned` values are typically 0 and the real number lives in `flex`. On a flex-budgeting account the majority of rows are usually pooled this way, so adding up the category rows understates planned spending by the whole size of the Flexible bucket. Compare against `totals[].expenses` rather than trusting a row sum.
-
-`flex.status` is one of:
-
-- `ok` — a Flexible bucket amount was returned
-- `not_configured` — the account has no Flexible bucket (e.g. it is not on flex budgeting)
-- `unsupported` — Monarch rejected the extended fields, so the narrower fallback query ran
-
-A status other than `ok` means **no amount is available — it does not mean zero**. When it is `unsupported`, `groups`, `goals`, `totals`, `budget_system` and each row's `rollover` / `rollover_type` / `budget_variability` are all `null` for the same reason.
-
-For `groups`, `goals` and `totals`, `null` means "could not be fetched" while `[]` means "asked, and there were none".
-
-Per-row, `planned - actual` equals `remaining` only when `rollover` is zero; for rollover categories the carried balance accounts for the difference.
-
-**Never add a group's `planned` to its categories' `planned`** — that double-counts either way. `group_level_budgeting` tells you which level holds the real budget: when `true` the group does and its categories carry none; when `false` the group row is only the roll-up of those same categories.
-
-Full response shape:
-
-| Key | Contents |
-|---|---|
-| `tool`, `args` | echo of the call |
-| `budget_system` | e.g. `"fixed_and_flex"`, or `null` |
-| `data[]` | `id`, `name`, `planned`, `actual`, `remaining`, `set_aside`, `rollover`, `rollover_type`, `category_group`, `category_type`, `budget_variability`, `month` |
-| `flex` | `status`, `budget_variability`, `monthly[]` (`month`, `planned`, `actual`, `remaining`, `rollover`, `rollover_type`) |
-| `groups[]` | `id`, `name`, `planned`, `actual`, `remaining`, `rollover`, `rollover_type`, `category_type`, `group_level_budgeting`, `month` |
-| `goals[]` | `id`, `name`, `priority`, `archived`, `completed`, `planned_contributions[]`, `actual_contributions[]` |
-| `totals[]` | `month`, plus `income` / `expenses` / `flexible` / `fixed` / `non_monthly`, each `planned`, `actual`, `remaining`, `rollover` |
-
-Goal contributions are a **separate** quantity from a category's `set_aside`; adding them together double-counts.
-
-`start_date` and `end_date` must be passed **together or not at all** — supplying only one is rejected rather than filled in, because completing the missing side from today can invert the range and return an empty result that reads as "no budget".
-
-### Set the Flexible Bucket Amount
-```
-Set my flexible budget to $1,500 for this month using set_flexible_budget
 ```
 
 ### Set a Budget Amount
@@ -392,7 +643,7 @@ Get my cashflow for the last 3 months using get_cashflow
 
 ### List Available Categories
 ```
-Show me all available categories using get_categories
+Show me all available categories using get_transaction_categories
 ```
 
 ### Review Uncategorized Transactions
@@ -412,7 +663,7 @@ Add the "Tax Deductible" tag to this transaction using set_transaction_tags
 
 ### Search for Transactions
 ```
-Find all Amazon transactions over $50 from the last month using search_transactions
+Find all Amazon transactions from the last month using search_transactions
 ```
 
 ### View Recurring Bills
@@ -505,7 +756,7 @@ monarch-mcp-server/
 │   └── tools/             # MCP tools grouped by domain (accounts, transactions, budgets, …)
 ├── login_setup.py         # Terminal authentication script
 ├── pyproject.toml         # Project configuration
-├── requirements.txt       # Dependencies
+├── requirements-lock.txt  # Generated from uv.lock, hash pinned
 └── README.md             # This documentation
 ```
 
@@ -522,17 +773,59 @@ monarch-mcp-server/
 - Session tokens are stored in the system keyring
 - Authentication handled in secure terminal environment
 
+### Strongest option: read only mode
+
+Set `MONARCH_MCP_READ_ONLY=1` in the server's environment and the mutating
+tools are never registered. They do not appear in the tool list and cannot be
+called at all, which is stronger than an approval prompt: a model that was
+talked into a write by a merchant name or memo it read back cannot invoke a
+tool that is not there.
+
+```json
+{
+  "mcpServers": {
+    "Monarch Money": {
+      "command": "/opt/homebrew/bin/uv",
+      "args": ["run", "--project", "/path/to/your/monarch-mcp-server", "monarch-mcp-server"],
+      "env": { "MONARCH_MCP_READ_ONLY": "1" }
+    }
+  }
+}
+```
+
+This leaves 35 of the 68 tools available, covering everything that reads.
+Read only is off by default outside Docker, so existing setups are unaffected;
+the Docker image turns it on (see [Start the HTTP server](#start-the-http-server)). Note that it
+also removes the login and logout tools, since those change durable state, so
+authenticate with `login_setup.py` before enabling it.
+
 ### Recommended: require approval for mutating tools
 
-Several tools mutate your Monarch ledger (`create_transaction`, `update_transaction`, `delete_transaction`, `bulk_categorize_transactions`, `upload_account_balance_history`, `set_transaction_tags`, `create_transaction_rule`, `update_transaction_rule`, `delete_transaction_rule`, `split_transaction`, `set_budget_amount`, `set_flexible_budget`, `update_flex_rollover_settings`, `update_merchant`, `review_recurring_stream`, `categorize_transaction`, `update_transaction_notes`, `mark_transaction_reviewed`, `add_transaction_tag`, `create_transaction_tag`, `create_transaction_category`, `update_category`).
+These tools mutate your Monarch data. The list is every registered tool that writes, checked against the source rather than maintained by hand:
 
-Note `update_category` also carries rollover-reset arguments (`rollover_start_month`, `rollover_starting_balance`), so it can discard a category's accumulated rollover — see issue #107.
+**Accounts**: `update_account`
 
-`update_flex_rollover_settings` deserves particular care: it discards the Flex bucket's accumulated rollover balance and starts a fresh period. Its two destructive arguments are deliberately required rather than defaulted, so it cannot be invoked as a no-argument "reset", but it should still be approved manually every time.
+**Transactions**: `create_transaction`, `update_transaction`, `delete_transaction`, `categorize_transaction`, `update_transaction_notes`, `mark_transaction_reviewed`, `bulk_categorize_transactions`, `bulk_update_transactions`, `split_transaction`, `set_business_entity`, `upload_account_balance_history`
+
+**Tags**: `set_transaction_tags`, `add_transaction_tag`, `create_transaction_tag`
+
+**Rules**: `create_transaction_rule`, `update_transaction_rule`, `delete_transaction_rule`, `reorder_transaction_rule`
+
+**Categories and budgets**: `create_transaction_category`, `create_transaction_category_group`, `update_transaction_category_group`, `update_category`, `set_budget_amount`
+
+**Goals**: `update_savings_goal`, `set_goal_contribution`
+
+**Merchants**: `update_merchant`, `merge_merchants`, `review_recurring_stream`
+
+**Session**: `monarch_login`, `monarch_login_with_token`, `monarch_logout`
+
+`refresh_accounts` is side effecting too, since it posts a refresh request to your institutions, though it does not change your ledger.
 
 Because the LLM can be influenced by data it reads back (a malicious-looking memo or merchant name in a transaction), the safest setup is to configure your MCP client to require manual approval before any mutating tool runs. In Claude Desktop and Claude Code this is the default behavior for unknown tools; keep it that way for the tools listed above rather than allow-listing them.
 
-`bulk_categorize_transactions` and `upload_account_balance_history` also accept a `dry_run=True` argument that returns the planned changes without executing them, useful for previewing a bulk action before approving it.
+`bulk_categorize_transactions`, `bulk_update_transactions`, `upload_account_balance_history`, `update_account` and `update_category` accept a `dry_run=True` argument that returns the planned changes without executing them, useful for previewing before approving.
+
+`update_category` additionally requires `confirm_rollover_reset=True` before `rollover_start_month` or `rollover_starting_balance` will be applied. Those two restart a category's rollover period and discard the balance accumulated in it, which cannot be undone, so they cannot ride along unnoticed in a call that otherwise reads like a rename.
 
 ## 🙏 Acknowledgments
 
@@ -563,3 +856,21 @@ To update the server:
 1. Pull latest changes from repository
 2. Restart Claude Desktop or Claude Code
 3. Re-run authentication if needed: `python login_setup.py`
+
+### Managing budget groups
+
+Use `get_category_group_details` and `get_budget_summary` before changing a
+group. `create_transaction_category_group(name="Family", dry_run=True)` previews
+creation; an existing same-name, same-type group is reused.
+`update_transaction_category_group(group_id="...", name="Core bills",
+group_level_budgeting_enabled=False, dry_run=True)` previews a rename and a switch
+to category-level budgeting. Set `dry_run=False` to apply. Group writes confirm
+the returned entity against a fresh read; after an error, inspect current groups
+before retrying because a write can succeed before verification fails.
+
+Switching budgeting mode does not migrate existing budget amounts. Reconcile
+old group targets and category targets with `set_budget_amount`, then verify
+`get_budget_summary.totals_by_month`. Category and group budget rows overlap;
+never sum both. These tools do not delete groups, move categories or reset
+rollovers. Use `update_category` for category moves. Income and expense groups
+are supported; transfer-group creation is intentionally not exposed.

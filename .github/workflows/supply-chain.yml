@@ -1,0 +1,426 @@
+# Supply-chain checks.
+#
+# This server holds a long-lived credential for the user's real financial
+# accounts, so a compromised or vulnerable dependency is the highest-impact
+# failure mode in the repo. One check lives here: `audit` screens the *locked*
+# dependency set (everything `uv.lock` actually resolves to) against both the
+# PyPI advisory database and OSV,
+# and fails on anything not already recorded in .github/audit-baseline.txt.
+#
+# There was a `dependency-review` job here. It was removed because the
+# dependency graph is disabled for this repository, so the action failed every
+# run. Enabling it is a settings change and is free on a public repo, so this
+# is a decision that can be revisited rather than a dead end.
+#
+# An earlier version of this comment claimed GitHub's graph cannot parse
+# `uv.lock`. That is wrong, and the correction is recorded here because it was
+# the stated reason for deleting the job: the graph does ingest `uv.lock` as a
+# pip manifest, and the compare endpoint the action calls does report added and
+# removed lock entries. The honest argument for leaving the job out is that it
+# would largely duplicate what the audit below already does against the same
+# locked set, not that it could not work.
+#
+# Deliberately NOT implemented here (tracked in #99 / #100): the network-egress
+# canary job, the sdist-diff artifact on bump PRs, and PyPI-vs-tag
+# verification. Lockfile drift (`uv lock --check`) belongs to ci.yml (#95), not
+# to this workflow.
+#
+# Hardening notes, since a security workflow is itself an attack surface:
+#   * No `pull_request_target`. Fork PR code is only ever built with a
+#     read-only token and no access to repository secrets.
+#   * Every third-party action is pinned to a full 40-character commit SHA,
+#     with the human-readable tag in a trailing comment. A floating tag on a
+#     security workflow would defeat the point of having one.
+#   * No `${{ ... }}` interpolation of attacker-controlled values (PR title,
+#     branch name, author, body) into any `run:` block. Values that a `run:`
+#     block needs are passed through `env:` instead.
+
+name: Supply chain
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Advisories get published against dependencies we have not touched in
+  # months, so the audit has to run on a clock and not only on code changes.
+  schedule:
+    - cron: "23 6 * * 1" # Mondays, 06:23 UTC
+
+# Least privilege: nothing in this workflow writes anything. `contents: read`
+# is the floor and no job widens it. In particular we do not take
+# `security-events: write`, because we deliberately do not upload SARIF; the
+# findings go to the job summary instead.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Superseded PR runs are worth cancelling; scheduled and main-branch runs are
+  # not, because their whole job is to produce a record.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  audit:
+    name: Audit locked dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # Kept in step with ci.yml by hand. Dependabot bumps action SHAs, not a
+      # `with: version:` input, so a grep for the version string has to find
+      # both files.
+      UV_VERSION: "0.12.10"
+      UV_CHECKSUM: "173d95a0c32d18c896c46ba6fafbf3cf9c14ab74b033f81b76c883ef492a976b"
+      # Pinned so that a compromised pip-audit release cannot walk in through
+      # this job. The advisory data itself is fetched from the services at run
+      # time, so pinning the tool does not stale the results. Bump manually.
+      PIP_AUDIT_VERSION: "2.10.1"
+      BASELINE_FILE: .github/audit-baseline.txt
+      # The three below are written under RUNNER_TEMP, never the workspace. pip-audit creates its
+      # --output lazily and does not truncate it when it exits fatally, and the
+      # invocations below tolerate a non-zero exit. If these lived in the
+      # checkout, a fork PR could commit a clean looking pip-audit-*.json, make
+      # the tool fatal (a hashless or URL requirement in uv.lock does it under
+      # --require-hashes --strict), and the gate would read the attacker's file
+      # and report no advisories. RUNNER_TEMP is not attacker writable, so a
+      # report existing there means pip-audit actually wrote it.
+      REQUIREMENTS_FILE: requirements-audit.txt
+      OSV_REPORT_NAME: pip-audit-osv.json
+      PYPI_REPORT_NAME: pip-audit-pypi.json
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz for the version above,
+          # from the release's published .sha256 file. Verified by the action
+          # before the binary is unpacked.
+          checksum: ${{ env.UV_CHECKSUM }}
+          # No cross-run cache: a poisoned cache entry is a real path into a
+          # security job, and this dependency tree is far too small to need one.
+          enable-cache: false
+
+      - name: Export the locked dependency set
+        # `--frozen` guarantees we audit exactly what `uv.lock` already pins. If
+        # the export were allowed to re-resolve, we would be auditing something
+        # other than what ships.
+        #
+        # `--all-extras` pulls the `dev` extra in too. A malicious `pytest` runs
+        # on maintainer machines and on this runner just as a malicious `mcp`
+        # would, so it is in scope for the malicious-package gate below.
+        #
+        # The export carries `--hash=` lines for every pin, which lets the audit
+        # run with `--require-hashes --no-deps --disable-pip`: no resolver, no
+        # index traffic, nothing installed. The only network call is to the
+        # advisory service.
+        run: |
+          uv export \
+            --frozen \
+            --all-extras \
+            --all-groups \
+            --no-emit-project \
+            --no-editable \
+            --format requirements-txt \
+            --output-file "${RUNNER_TEMP}/${REQUIREMENTS_FILE}.marked"
+          # pip-audit silently skips any requirement whose environment marker is
+          # false on the runner, without even recording it as skipped, so
+          # --strict does not notice. On ubuntu that quietly drops the win32
+          # pins (colorama, pywin32, pywin32-ctypes) that Windows users of this
+          # server actually install. Strip the markers so every locked pin is
+          # audited regardless of the platform CI happens to run on.
+          sed -E 's/ ; [^\\]*(\\?)$/ \1/' \
+            "${RUNNER_TEMP}/${REQUIREMENTS_FILE}.marked" \
+            > "${RUNNER_TEMP}/${REQUIREMENTS_FILE}"
+          exported=$(grep -cE '^[A-Za-z0-9]' "${RUNNER_TEMP}/${REQUIREMENTS_FILE}" || true)
+          echo "Exported ${exported} pinned requirements."
+          # An empty or truncated export is the one way this job goes green on
+          # zero coverage: pip-audit accepts an empty requirements file, exits
+          # 0, and writes a valid report with no dependencies, which the gate
+          # would read as "no known advisories". grep -c returning 1 on no
+          # matches does not trip errexit inside a command substitution, so
+          # this has to be checked explicitly.
+          if [ "${exported}" -lt 1 ]; then
+            echo "::error::The dependency export produced no requirements."
+            exit 1
+          fi
+          echo "EXPECTED_REQUIREMENTS=${exported}" >> "${GITHUB_ENV}"
+
+      - name: pip-audit against OSV
+        # OSV carries malicious-package advisories (MAL-* IDs) in addition to
+        # CVEs, which is what makes it the gate for known-compromised releases,
+        # typosquats, and versions yanked for malware.
+        #
+        # `|| true`: pip-audit exits non-zero both when it finds something and
+        # when it fails outright. The gate step below distinguishes the two by
+        # checking whether the JSON report parsed.
+        run: |
+          rm -f "${RUNNER_TEMP}/${OSV_REPORT_NAME}"
+          uvx --no-config --from "pip-audit==${PIP_AUDIT_VERSION}" pip-audit \
+            --requirement "${RUNNER_TEMP}/${REQUIREMENTS_FILE}" \
+            --require-hashes \
+            --no-deps \
+            --disable-pip \
+            --strict \
+            --vulnerability-service osv \
+            --aliases on \
+            --format json \
+            --output "${RUNNER_TEMP}/${OSV_REPORT_NAME}" \
+            --progress-spinner off || true
+
+      - name: pip-audit against the PyPI advisory database
+        # Run as well as OSV, not instead of it: the two databases have
+        # overlapping but not identical coverage, and running both means a
+        # single upstream outage does not blind the check.
+        run: |
+          rm -f "${RUNNER_TEMP}/${PYPI_REPORT_NAME}"
+          uvx --no-config --from "pip-audit==${PIP_AUDIT_VERSION}" pip-audit \
+            --requirement "${RUNNER_TEMP}/${REQUIREMENTS_FILE}" \
+            --require-hashes \
+            --no-deps \
+            --disable-pip \
+            --strict \
+            --vulnerability-service pypi \
+            --aliases on \
+            --format json \
+            --output "${RUNNER_TEMP}/${PYPI_REPORT_NAME}" \
+            --progress-spinner off || true
+
+      - name: Report findings and gate on malicious packages
+        # FAIL vs REPORT, and why it is split this way:
+        #
+        # Hard-failing on any advisory anywhere in the tree is the obvious
+        # choice and the wrong one here. At the time this workflow was written
+        # the committed lock already carried about 30 distinct advisories across
+        # 12 packages: starlette, python-multipart, mcp, click, pygments and
+        # friends, nearly all of them transitive under `mcp[cli]` and none of
+        # them fixable from this repo without waiting on upstream. A hard gate
+        # would have every unrelated PR red on arrival, which trains everyone
+        # to ignore the check. A security control that is always failing is a
+        # security control that is off.
+        #
+        # So the split is by *actionability and false-positive rate*:
+        #
+        #   MAL-* (malicious package) -> hard fail. A malicious-package
+        #   advisory means the exact release we pin is actively compromised.
+        #   There is no "we will get to it" version of that, and the
+        #   false-positive rate is effectively zero. This is precisely the
+        #   attack #99 is about, and it is worth blocking every PR over.
+        #
+        #   Everything else -> fails unless its id set intersects
+        #   .github/audit-baseline.txt. The baseline is the standing, dated
+        #   acknowledgement of what is already known and not fixable today, so
+        #   the backlog stays quiet while anything newly published is red.
+        #
+        # The hard gate is the baseline delta below: anything not already
+        # recorded in .github/audit-baseline.txt fails the build. That is what
+        # separates "this backlog is known and accepted" from "something new
+        # was published against a pin we ship", without going permanently red
+        # over the former.
+        #
+        # This step interpolates nothing; it reads only files produced above.
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          TEMP = pathlib.Path(os.environ["RUNNER_TEMP"])
+          SOURCES = (
+              ("OSV", TEMP / os.environ["OSV_REPORT_NAME"]),
+              ("PyPI", TEMP / os.environ["PYPI_REPORT_NAME"]),
+          )
+
+          findings: dict[tuple[str, str, str], dict[str, object]] = {}
+          available: list[str] = []
+          unavailable: list[str] = []
+          audited = 0
+
+          for label, path in SOURCES:
+              try:
+                  report = json.loads(path.read_text())
+                  dependencies = report["dependencies"]
+              except (OSError, ValueError, KeyError, TypeError):
+                  unavailable.append(label)
+                  continue
+
+              available.append(label)
+              audited = max(audited, len(dependencies))
+
+              for dep in dependencies:
+                  name, version = dep.get("name", "?"), dep.get("version", "?")
+                  for vuln in dep.get("vulns") or []:
+                      key = (name, version, vuln.get("id", "?"))
+                      ids = [key[2], *(vuln.get("aliases") or [])]
+                      entry = findings.setdefault(
+                          key,
+                          {
+                              "ids": ids,
+                              "fix": vuln.get("fix_versions") or [],
+                              "sources": [],
+                          },
+                      )
+                      # Union the ids: the two services can report different
+                      # alias sets for the same advisory, and keeping only the
+                      # first would miss a baseline entry naming the other's.
+                      entry["ids"] = sorted({*entry["ids"], *ids})
+                      entry["sources"].append(label)
+
+          # Anything whose id set does not intersect the baseline is new since
+          # the backlog was last acknowledged, and fails the build.
+          #
+          # Matching on the whole id set rather than the primary id is
+          # deliberate: pip-audit re-sorts ids to prefer PYSEC and CVE as the
+          # primary, so a primary id can change when a service later adds an
+          # alias. Matching every id keeps a baseline entry stable.
+          baseline: set[str] = set()
+          baseline_path = pathlib.Path(os.environ["BASELINE_FILE"])
+          if baseline_path.is_file():
+              for raw in baseline_path.read_text().splitlines():
+                  entry = raw.split("#", 1)[0].strip()
+                  if entry:
+                      baseline.add(entry.upper())
+
+          new_findings = sorted(
+              key
+              for key, entry in findings.items()
+              if not {str(i).upper() for i in entry["ids"]} & baseline
+          )
+
+          # Kept as a separate always-fail regardless of the baseline. A
+          # malicious package advisory is never something to acknowledge and
+          # move on from, so it must not be silenceable by adding a line to a
+          # file. Note the prefix test alone is not sufficient coverage:
+          # GitHub-reviewed malware is not consistently mirrored into the MAL-
+          # namespace (the canonical ctx compromise is GHSA-4g82-3jcr-q52w,
+          # "Malware in ctx"). The baseline delta above is what actually
+          # catches that case, because such an advisory would be new.
+          malicious = sorted(
+              key
+              for key, entry in findings.items()
+              if any(str(i).upper().startswith("MAL-") for i in entry["ids"])
+          )
+
+          out = []
+          out.append("## Locked dependency audit\n")
+          out.append(
+              f"Advisory services queried: "
+              f"{', '.join(available) if available else 'none'}. "
+              f"{audited} locked requirement entries audited.\n"
+          )
+          if unavailable:
+              out.append(
+                  f"> Advisory service(s) unavailable this run: "
+                  f"{', '.join(unavailable)}.\n"
+              )
+
+          if new_findings:
+              out.append(
+                  f"\n### New advisories since the baseline ({len(new_findings)}) "
+                  "- build failed\n\n"
+              )
+              out.append(
+                  "Upgrade the dependency, or add the advisory id to "
+                  f"`{os.environ['BASELINE_FILE']}` with a note saying why it "
+                  "is accepted.\n\n"
+              )
+              for name, version, vid in new_findings:
+                  entry = findings[(name, version, vid)]
+                  fix = ", ".join(entry["fix"]) or "none published"
+                  out.append(f"- `{name}=={version}` {vid}, fixed in {fix}\n")
+
+          if malicious:
+              out.append("\n### Malicious package advisories (build failed)\n")
+              for name, version, vid in malicious:
+                  ids = ", ".join(str(i) for i in findings[(name, version, vid)]["ids"])
+                  out.append(f"- `{name}=={version}` - {ids}\n")
+
+          if findings:
+              out.append(f"\n### All advisories ({len(findings)})\n\n")
+              out.append("| Package | Version | Advisory | Fixed in | Source |\n")
+              out.append("| --- | --- | --- | --- | --- |\n")
+              for (name, version, vid) in sorted(findings):
+                  entry = findings[(name, version, vid)]
+                  fix = ", ".join(entry["fix"]) or "none published"
+                  src = ", ".join(sorted(set(entry["sources"])))
+                  out.append(f"| `{name}` | `{version}` | {vid} | {fix} | {src} |\n")
+              out.append(
+                  f"\n{len(findings) - len(set(new_findings) | set(malicious))} "
+                  "of these are in the accepted baseline and did not fail the "
+                  "build.\n"
+              )
+          else:
+              out.append("\nNo known advisories against the locked dependency set.\n")
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.writelines(out)
+          sys.stdout.writelines(out)
+
+          # Fail closed only when we learned nothing at all. If one service
+          # answered, its data is good enough to gate on; if neither did, the
+          # check silently passing would be worse than a red build.
+          # OSV is the only one of the two services that publishes MAL-
+          # malicious package advisories, so it alone backs the hard gate below.
+          # Passing because PyPI answered while OSV did not would mean the
+          # malicious package check ran with zero coverage and still went green.
+          # Guard against auditing nothing and calling it clean. The count the
+          # export step measured is the only independent witness the gate has
+          # that it was handed the real dependency set.
+          expected_raw = os.environ.get("EXPECTED_REQUIREMENTS", "").strip()
+          if not expected_raw.isdigit():
+              print(
+                  "::error::The export step did not report how many "
+                  "requirements it produced, so the audit cannot be checked "
+                  "against it. Failing closed."
+              )
+              raise SystemExit(1)
+          expected = int(expected_raw)
+          if audited != expected:
+              print(
+                  f"::error::Audited {audited} requirement entries but the "
+                  f"export produced {expected}. Refusing to report on a "
+                  "dependency set that does not match what was locked."
+              )
+              raise SystemExit(1)
+
+          if "OSV" not in available:
+              print(
+                  "::error::No usable OSV report was produced (service "
+                  "unreachable, or --strict tripped on a requirement it could "
+                  "not collect). OSV is the only source of MAL- malicious "
+                  "package advisories, so the gate has no coverage without it. "
+                  "Failing closed rather than passing on no evidence."
+              )
+              raise SystemExit(1)
+
+          failed = False
+
+          if malicious:
+              for name, version, vid in malicious:
+                  print(f"::error::Malicious package advisory {vid} for {name}=={version}")
+              failed = True
+
+          if new_findings:
+              for name, version, vid in new_findings:
+                  print(
+                      f"::error::New advisory {vid} for {name}=={version}. "
+                      "Upgrade it, or add the id to "
+                      f"{os.environ['BASELINE_FILE']} with a reason."
+                  )
+              failed = True
+
+          if failed:
+              raise SystemExit(1)
+          PY

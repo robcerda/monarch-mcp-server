@@ -1,0 +1,178 @@
+name: CI
+
+# pull_request (not pull_request_target) so forked-PR code runs with a read-only
+# token against the fork's context. pull_request_target would hand untrusted code
+# a write-scoped token for this repo.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: nothing here writes to the repo, so read access to the code is
+# all any job needs. Scopes not listed are dropped, not inherited.
+permissions:
+  contents: read
+
+# A newer push to a PR makes the in-flight run obsolete; don't burn runners on it.
+# main is exempt so every merged commit keeps a result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Pinned rather than floating so a uv release cannot change what CI installs
+  # without a reviewed commit. uv is also the thing that extracts every package
+  # archive here, so its version is a supply chain decision in its own right:
+  # everything before 0.11.15 carries advisories covering arbitrary file write
+  # via entry point names, file deletion via RECORD entries, tar path traversal,
+  # and ZIP parsing differentials that let an archive present different contents
+  # to a scanner than to the installer. That last one would undercut the whole
+  # point of the supply chain workflow. Verified that this version accepts the
+  # current revision 2 uv.lock unchanged, so the pin costs nothing.
+  UV_VERSION: "0.12.10"
+  # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz for UV_VERSION, from the
+  # release's published .sha256. setup-uv only validates against a checksum
+  # table baked into the action at its pinned commit, and that table stops at
+  # uv 0.12.4, so without this the newer binary is fetched and executed with no
+  # integrity check and only a core.debug line to say so. Update both together.
+  UV_CHECKSUM: "173d95a0c32d18c896c46ba6fafbf3cf9c14ab74b033f81b76c883ef492a976b"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Split out from the tests so a drifted lockfile reports as its own failure
+  # instead of hiding behind a Python version in the matrix.
+  lockfile:
+    name: Lockfile is in sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Actions are pinned to full commit SHAs: a tag is mutable, so a compromised
+      # or retagged release would otherwise run in this workflow unreviewed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in this job needs the token, so do not leave it in
+          # .git/config.
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          checksum: ${{ env.UV_CHECKSUM }}
+          enable-cache: true
+
+      # Fails if pyproject.toml asks for versions uv.lock doesn't pin. Without this,
+      # a dependency bump that skips `uv lock` leaves the lock pinning the old
+      # version, and the hashes it carries stop covering what's actually requested.
+      - name: uv lock --check
+        run: uv lock --check
+
+      # requirements-lock.txt is generated from uv.lock and is the documented
+      # pip install path. If it drifts, that path silently loses its pins and
+      # hashes while everything else stays locked, which is the one install
+      # route with no supply chain guarantee. Regenerate it in the same commit
+      # that changes a dependency.
+      - name: requirements-lock.txt matches uv.lock
+        run: |
+          uv export --frozen --no-emit-project --no-editable --no-dev \
+            --format requirements-txt --output-file "${RUNNER_TEMP}/expected.txt"
+          # Compare only the requirement and hash lines: the committed file
+          # carries an explanatory header that the export does not.
+          strip() { grep -vE '^\s*#' "$1" | grep -vE '^\s*$'; }
+          if ! diff -u <(strip "${RUNNER_TEMP}/expected.txt") <(strip requirements-lock.txt); then
+            echo "::error::requirements-lock.txt is out of sync with uv.lock. Regenerate it: uv export --frozen --no-emit-project --no-editable --no-dev --format requirements-txt --output-file requirements-lock.txt"
+            exit 1
+          fi
+          echo "requirements-lock.txt matches the lock."
+
+          # requirements.txt is a compatibility shim that must stay inert. If
+          # anything ever resolves it as a manifest and writes pins into it,
+          # the pip install path silently stops matching uv.lock again, which
+          # is the failure this whole arrangement exists to prevent.
+          # Captured rather than piped into `grep -q`: under pipefail, -q exits
+          # early, the upstream grep takes SIGPIPE, and the pipeline reports
+          # 141 instead of 0, so the check would never fire.
+          stray=$(grep -vE '^\s*(#|$)' requirements.txt \
+            | grep -vxF -- '-r requirements-lock.txt' || true)
+          if [ -n "${stray}" ]; then
+            echo "::error::requirements.txt must contain nothing but the include of requirements-lock.txt. Something wrote version specifiers into it:"
+            printf '%s\n' "${stray}"
+            exit 1
+          fi
+          echo "requirements.txt is still an inert shim."
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      # Report every version's result; one failure shouldn't mask the others.
+      fail-fast: false
+      matrix:
+        # Tracks requires-python = ">=3.12,<3.15" in pyproject.toml.
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job builds and runs fork controlled code, so do not leave the
+          # token in .git/config for it to read.
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          checksum: ${{ env.UV_CHECKSUM }}
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      # --locked installs exactly what uv.lock pins, hash-verified, and refuses to
+      # re-resolve. Without it CI could quietly test a different dependency set
+      # than the one that was reviewed. --extra dev pulls in pytest.
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+
+      # --no-sync because the step above already built the environment.
+      - name: Run tests
+        run: uv run --no-sync pytest -q
+
+  # The locked set pins one mcp release, but the constraint allows the whole
+  # 1.x and 2.x range and users install across it. 2.x moved host, port and
+  # transport_security off Settings onto run(), so a change that quietly
+  # depends on either shape would pass the job above and still break a real
+  # install. This runs the suite against the edges of what is allowed.
+  mcp-compatibility:
+    name: Tests (mcp ${{ matrix.mcp-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # The declared floor and the current 2.x release.
+        mcp-version: ["1.30.0", "2.3.0"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          checksum: ${{ env.UV_CHECKSUM }}
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+
+      # Deliberately re-resolves just this one package, which is the point of
+      # the job. Everything else stays on the locked, hash-verified set.
+      - name: Pin mcp to ${{ matrix.mcp-version }}
+        run: uv pip install "mcp[cli]==${{ matrix.mcp-version }}"
+
+      - name: Run tests
+        run: uv run --no-sync pytest -q
+        env:
+          # Never touch the runner's credential store.
+          PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring

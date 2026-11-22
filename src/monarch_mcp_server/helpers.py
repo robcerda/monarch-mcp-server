@@ -2,9 +2,56 @@
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Monarch's aggregate queries return every bucket they have — a full year runs to
+# hundreds of categories and thousands of merchants, which overflows the MCP
+# response limit. Rows are only trimmed when a response would actually exceed the
+# budget, stepping down this ladder of per-breakdown caps until it fits.
+MAX_RESPONSE_CHARS = 45_000
+LIMIT_LADDER = (100, 50, 20, 10, 5)
+
+
+def strip_typenames(value: Any) -> Any:
+    """Recursively drop GraphQL ``__typename`` keys from a payload."""
+    if isinstance(value, dict):
+        return {k: strip_typenames(v) for k, v in value.items() if k != "__typename"}
+    if isinstance(value, list):
+        return [strip_typenames(item) for item in value]
+    return value
+
+
+def breakdown(rows: List[Dict[str, Any]], limit: Optional[int]) -> Dict[str, Any]:
+    """Wrap ranked ``rows`` so any cap applied is visible to the caller."""
+    capped = rows[:limit] if limit else rows
+    return {
+        "total": len(rows),
+        "returned": len(capped),
+        "truncated": len(capped) < len(rows),
+        "rows": capped,
+    }
+
+
+def render_within_budget(
+    render: Callable[[Optional[int]], str], limit: Optional[int]
+) -> str:
+    """Render the largest response that fits under ``MAX_RESPONSE_CHARS``.
+
+    ``render`` takes the per-breakdown cap to apply (None for no cap) and returns
+    the serialized response. An explicit *limit* is honoured as-is — including 0,
+    which means "never trim" — and otherwise the cap steps down the ladder only
+    as far as it must.
+    """
+    if limit is not None:
+        return render(limit or None)
+
+    for applied in (None, *LIMIT_LADDER):
+        rendered = render(applied)
+        if len(rendered) <= MAX_RESPONSE_CHARS:
+            return rendered
+    return rendered
 
 
 def format_exception(exc: Exception) -> str:
@@ -21,6 +68,21 @@ def format_exception(exc: Exception) -> str:
     if rep:
         return rep
     return type(exc).__name__
+
+
+def require_nonblank(value: str, field: str) -> None:
+    """Refuse a blank name before it reaches Monarch.
+
+    Monarch makes a merchant out of whatever string it is handed, so a blank
+    or whitespace-only name quietly creates a junk merchant record instead of
+    failing. Lives here rather than in one tool because the hole belongs to
+    the field, not the caller: transactions, merchants and rules all write
+    merchant names. Raised, not returned, since every one of those funnels
+    exceptions through json_error and a shared validator should not have to
+    know which tool called it.
+    """
+    if not value.strip():
+        raise ValueError(f"{field} must not be blank")
 
 
 def first_present(*values: Any) -> Any:
@@ -84,6 +146,8 @@ def format_transaction(txn: Dict[str, Any], extended: bool = False) -> Dict[str,
         "category_id": txn.get("category", {}).get("id") if txn.get("category") else None,
         "account": txn.get("account", {}).get("displayName") if txn.get("account") else None,
         "account_id": txn.get("account", {}).get("id") if txn.get("account") else None,
+        "business_entity": (txn.get("businessEntity") or {}).get("name"),
+        "business_entity_id": (txn.get("businessEntity") or {}).get("id"),
         "notes": txn.get("notes"),
         "needs_review": txn.get("needsReview", False),
         "is_pending": txn.get("pending", False),
@@ -100,6 +164,60 @@ def format_transaction(txn: Dict[str, Any], extended: bool = False) -> Dict[str,
         info["has_attachments"] = bool(txn.get("attachments"))
 
     return info
+
+
+def payload_errors(
+    result: Any, *payload_keys: str
+) -> Optional[Dict[str, Any]]:
+    """Return a GraphQL payload's ``errors`` object, or None if the write took.
+
+    ``gql_call`` raises on transport errors and on top level GraphQL errors,
+    but Monarch rejects a mutation by returning ``errors`` *inside* an HTTP 200
+    body. Treating "no exception" as success therefore reports refused writes
+    as completed ones, which is worse than an outright failure: the caller
+    marks the work done and moves on.
+
+    Pass the payload keys to look under, e.g. ``"updateTransaction"``. With no
+    keys, every top level payload in the response is checked.
+
+    Monarch sometimes rejects with an all null error object, which is truthy
+    but carries no information, so that is normalised to a readable message.
+    """
+    if not isinstance(result, dict):
+        return None
+
+    candidates = (
+        [result.get(key) for key in payload_keys]
+        if payload_keys
+        else list(result.values())
+    )
+
+    for payload in candidates:
+        if not isinstance(payload, dict):
+            continue
+        errors = payload.get("errors")
+        if not errors:
+            continue
+        if isinstance(errors, dict):
+            meaningful = {
+                k: v
+                for k, v in errors.items()
+                if k != "__typename" and v is not None
+            }
+            return meaningful or {"message": "Monarch rejected the request"}
+        return {"message": "Monarch rejected the request", "errors": errors}
+
+    return None
+
+
+def json_rejected(tool_name: str, errors: Dict[str, Any]) -> str:
+    """Serialize a payload level rejection as an explicit failure."""
+    logger.warning(f"{tool_name} was rejected by Monarch: {errors}")
+    return json.dumps(
+        {"success": False, "tool": tool_name, "errors": errors},
+        indent=2,
+        default=str,
+    )
 
 
 def json_success(data: Any) -> str:

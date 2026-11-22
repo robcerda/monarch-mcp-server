@@ -154,3 +154,65 @@ class TestAddTransactionTag:
         mock_monarch_client.get_transaction_details.side_effect = Exception("boom")
         result = await add_transaction_tag("txn-1", "tag-2")
         assert "add_transaction_tag" in result
+
+
+class TestAddTagNeverSilentlyReplaces:
+    """add_transaction_tag is documented as additive.
+
+    It is implemented as read modify replace, so anything that makes the read
+    untrustworthy turns it into a blind full replacement that reports success.
+    """
+
+    async def test_reads_the_pending_transaction_not_its_posted_twin(
+        self, mock_monarch_client
+    ):
+        """redirect_posted defaults to True upstream.
+
+        For a pending transaction Monarch then answers with the posted
+        counterpart, whose tags are written back over the pending one.
+        """
+        await add_transaction_tag("txn-1", "tag-2")
+        _args, kwargs = mock_monarch_client.get_transaction_details.call_args
+        assert kwargs.get("redirect_posted") is False
+
+    async def test_refuses_when_the_read_returns_another_transaction(
+        self, mock_monarch_client
+    ):
+        mock_monarch_client.get_transaction_details.return_value = {
+            "getTransaction": {"id": "POSTED-999", "tags": []}
+        }
+        result = json.loads(await add_transaction_tag("PENDING-111", "tagB"))
+        assert result["success"] is False
+        mock_monarch_client.set_transaction_tags.assert_not_called()
+
+    async def test_refuses_when_the_read_returns_nothing(self, mock_monarch_client):
+        """A null payload previously degraded into a one tag full wipe."""
+        mock_monarch_client.get_transaction_details.return_value = {
+            "getTransaction": None
+        }
+        result = json.loads(await add_transaction_tag("txn-1", "tag-2"))
+        assert result["success"] is False
+        mock_monarch_client.set_transaction_tags.assert_not_called()
+
+    async def test_rejected_write_is_not_reported_as_success(
+        self, mock_monarch_client
+    ):
+        mock_monarch_client.set_transaction_tags.return_value = {
+            "setTransactionTags": {
+                "errors": {"message": "Tag not found", "code": "INVALID"}
+            }
+        }
+        result = json.loads(await add_transaction_tag("txn-1", "tag-2"))
+        assert result["success"] is False
+        assert "Tag not found" in json.dumps(result)
+
+
+class TestSetTagsReportsRejection:
+    async def test_rejected_write_is_not_reported_as_success(
+        self, mock_monarch_client
+    ):
+        mock_monarch_client.set_transaction_tags.return_value = {
+            "setTransactionTags": {"errors": {"message": "nope", "code": "X"}}
+        }
+        result = json.loads(await set_transaction_tags("txn-1", ["tag-1"]))
+        assert result["success"] is False

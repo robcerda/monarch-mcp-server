@@ -1,0 +1,23 @@
+# Send only the files needed to build the application, excluding local credentials.
+*
+!Dockerfile
+!uv.lock
+!pyproject.toml
+!README.md
+!LICENSE
+!login_setup.py
+!src/
+!src/**
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+# src/** is re-included wholesale above, so anything that lands inside it
+# ships in the image. These are untracked locally and so are invisible in a
+# git diff, but .dockerignore governs the build context, not .gitignore.
+**/.DS_Store
+**/*.swp
+**/*~
+**/.env*
+**/*.pickle
+**/*.session
+**/.monarch-mcp-server

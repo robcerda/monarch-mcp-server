@@ -5,9 +5,12 @@ import json
 import logging
 import re
 import unicodedata
+from calendar import monthrange
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
+
+from gql import gql
 
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
@@ -16,7 +19,10 @@ from monarch_mcp_server.helpers import (
     format_exception,
     format_transaction,
     json_error,
+    json_rejected,
+    payload_errors,
     json_success,
+    require_nonblank,
     tool_response_envelope,
 )
 
@@ -42,6 +48,13 @@ KNOWN_CURRENCY_CODES = {
     "USD",
     "ZAR",
 }
+
+# Monarch's transaction list leaves out transactions marked "hide from
+# reports" unless the request asks for them through `transactionVisibility`.
+# Hiding is a reporting choice, not a deletion, so a tool that lists an
+# account's transactions has to opt in explicitly, or those rows disappear
+# with nothing in the response saying they were there.
+ALL_TRANSACTIONS_VISIBILITY = "all_transactions"
 
 
 def _normalize_search_text(value: Any) -> str:
@@ -241,6 +254,8 @@ def _format_transaction_row(
         "category_group_id": txn_category_metadata.get("group_id"),
         "account": account.get("displayName") if isinstance(account, dict) else None,
         "account_id": account.get("id") if isinstance(account, dict) else None,
+        "business_entity": _name_from_value(txn.get("businessEntity")),
+        "business_entity_id": _id_from_value(txn.get("businessEntity")),
         "merchant": _name_from_value(merchant),
         "merchant_id": _id_from_value(merchant),
         "is_pending": txn.get("isPending", txn.get("pending", False)),
@@ -275,9 +290,18 @@ async def get_transactions(
     is_recurring: Optional[bool] = None,
     wide_search: bool = False,
     search_scan_limit: int = 200,
+    include_hidden: bool = True,
 ) -> str:
     """
     Get transactions from Monarch Money.
+
+    Transactions marked "hide from reports" are included by default. Monarch
+    leaves them out unless asked, so without this an account's hidden rows
+    (transfers, funding legs, duplicates) vanish from the list with nothing in
+    the response to say so, and the account looks incomplete. Every row
+    carries `hide_from_reports`, so hidden ones can be told apart or dropped
+    locally. Pass include_hidden=False to get only the transactions Monarch's
+    reports count.
 
     Args:
         limit: Number of transactions to retrieve (default: 100)
@@ -302,6 +326,10 @@ async def get_transactions(
                      comes back empty.
         search_scan_limit: Maximum transactions the wide_search fallback
                            will scan locally (default 200)
+        include_hidden: Include transactions hidden from reports (default
+                        True). False returns only transactions that are not
+                        hidden, which is Monarch's own default. Applies to
+                        the wide_search fallback too.
     """
     try:
         client = await get_monarch_client()
@@ -379,6 +407,7 @@ async def get_transactions(
                     "is_recurring": is_recurring,
                     "wide_search": wide_search,
                     "search_scan_limit": search_scan_limit,
+                    "include_hidden": include_hidden,
                 }
                 return json_success(
                     tool_response_envelope(
@@ -399,6 +428,8 @@ async def get_transactions(
             filters["is_split"] = is_split
         if is_recurring is not None:
             filters["is_recurring"] = is_recurring
+        if include_hidden:
+            filters["transaction_visibility"] = ALL_TRANSACTIONS_VISIBILITY
 
         async def _wide_search(
             reason: str, original_error: Optional[Exception] = None
@@ -412,6 +443,9 @@ async def get_transactions(
                 }
 
             scan_limit = max(limit, search_scan_limit)
+            # Everything but the search text carries over, visibility
+            # included, so the local scan covers the same rows the server
+            # search would have.
             fallback_filters = {
                 key: value for key, value in filters.items() if key != "search"
             }
@@ -494,6 +528,7 @@ async def get_transactions(
             "is_recurring": is_recurring,
             "wide_search": wide_search,
             "search_scan_limit": search_scan_limit,
+            "include_hidden": include_hidden,
         }
         total_count = first_present(
             all_transactions.get("totalCount"),
@@ -554,7 +589,9 @@ async def search_transactions(
         tag_ids: List of tag IDs to filter by
         has_attachments: Filter for transactions with/without attachments
         has_notes: Filter for transactions with/without notes
-        hidden_from_reports: Filter for transactions hidden/shown in reports
+        hidden_from_reports: True for only transactions hidden from reports,
+            False for only those shown in reports, or None (default) for
+            both. Each row's `hide_from_reports` says which it is.
         is_split: Filter for split/non-split transactions
         is_recurring: Filter for recurring/non-recurring transactions
 
@@ -584,6 +621,11 @@ async def search_transactions(
             filters["has_notes"] = has_notes
         if hidden_from_reports is not None:
             filters["hidden_from_reports"] = hidden_from_reports
+        else:
+            # No filter means both kinds. Left unset, Monarch returns only
+            # transactions that are not hidden, so None would quietly behave
+            # like False. An explicit True or False is sent as before.
+            filters["transaction_visibility"] = ALL_TRANSACTIONS_VISIBILITY
         if is_split is not None:
             filters["is_split"] = is_split
         if is_recurring is not None:
@@ -601,12 +643,31 @@ async def search_transactions(
         return json_error("search_transactions", e)
 
 
+# The library's GetTransactionDrawer query does not select businessEntity, so
+# it is fetched separately and merged in. redirectPosted must match the
+# library's default, or a pending id would resolve to a different record.
+GET_TRANSACTION_BUSINESS_ENTITY_QUERY = gql("""
+query MCP_GetTransactionBusinessEntity($id: UUID!, $redirectPosted: Boolean) {
+  getTransaction(id: $id, redirectPosted: $redirectPosted) {
+    id
+    businessEntity {
+      id
+      name
+      __typename
+    }
+    __typename
+  }
+}
+""")
+
+
 @mcp.tool()
 async def get_transaction_details(transaction_id: str) -> str:
     """
     Get full details for a specific transaction.
 
-    Returns comprehensive information including attachments, splits, tags, and more.
+    Returns comprehensive information including attachments, splits, tags,
+    business entity, and more.
 
     Args:
         transaction_id: The ID of the transaction to get details for
@@ -617,6 +678,27 @@ async def get_transaction_details(transaction_id: str) -> str:
     try:
         client = await get_monarch_client()
         result = await client.get_transaction_details(transaction_id=transaction_id)
+        txn = result.get("getTransaction") if isinstance(result, dict) else None
+        if isinstance(txn, dict):
+            # Best effort. Businesses are a plan feature and this is a second
+            # query for one optional field, so a failure here must not take
+            # down details the drawer query already returned. Breaking a
+            # working read to add a field is how reorder_transaction_rule
+            # broke (#170).
+            try:
+                extra = await client.gql_call(
+                    operation="MCP_GetTransactionBusinessEntity",
+                    graphql_query=GET_TRANSACTION_BUSINESS_ENTITY_QUERY,
+                    variables={"id": transaction_id, "redirectPosted": True},
+                )
+                txn["businessEntity"] = (extra.get("getTransaction") or {}).get(
+                    "businessEntity"
+                )
+            except Exception as business_error:
+                logger.warning(
+                    "get_transaction_details could not read businessEntity: %s",
+                    business_error,
+                )
         return json_success(result)
     except Exception as e:
         return json_error("get_transaction_details", e)
@@ -645,6 +727,7 @@ async def create_transaction(
         update_balance: Whether to update the account balance (default: false)
     """
     try:
+        require_nonblank(merchant_name, "merchant_name")
         client = await get_monarch_client()
 
         transaction_data: Dict[str, Any] = {
@@ -661,6 +744,9 @@ async def create_transaction(
             transaction_data["update_balance"] = update_balance
 
         result = await client.create_transaction(**transaction_data)
+        errors = payload_errors(result, "createTransaction")
+        if errors:
+            return json_rejected("create_transaction", errors)
         return json_success(result)
     except Exception as e:
         return json_error("create_transaction", e)
@@ -677,6 +763,7 @@ async def update_transaction(
     hide_from_reports: Optional[bool] = None,
     needs_review: Optional[bool] = None,
     notes: Optional[str] = None,
+    owner_user_id: Optional[str] = None,
 ) -> str:
     """
     Update an existing transaction in Monarch Money.
@@ -691,6 +778,8 @@ async def update_transaction(
         hide_from_reports: Whether to hide this transaction from reports
         needs_review: Whether this transaction needs review
         notes: Notes for the transaction
+        owner_user_id: Member ID from get_household_members(), or "" for Shared.
+            Omitted or None leaves ownership unchanged.
     """
     try:
         client = await get_monarch_client()
@@ -700,6 +789,7 @@ async def update_transaction(
         if category_id is not None:
             update_data["category_id"] = category_id
         if merchant_name is not None:
+            require_nonblank(merchant_name, "merchant_name")
             update_data["merchant_name"] = merchant_name
         if goal_id is not None:
             update_data["goal_id"] = goal_id
@@ -711,10 +801,20 @@ async def update_transaction(
             update_data["hide_from_reports"] = hide_from_reports
         if needs_review is not None:
             update_data["needs_review"] = needs_review
+            if not needs_review:
+                # needsReview=False alone clears the flag but leaves Monarch's
+                # reviewedByUser / reviewedAt empty; `reviewed` records them,
+                # as a review in the web app does.
+                update_data["reviewed"] = True
         if notes is not None:
             update_data["notes"] = notes
+        if owner_user_id is not None:
+            update_data["owner_user_id"] = owner_user_id
 
         result = await client.update_transaction(**update_data)
+        errors = payload_errors(result, "updateTransaction")
+        if errors:
+            return json_rejected("update_transaction", errors)
         return json_success(result)
     except Exception as e:
         return json_error("update_transaction", e)
@@ -734,6 +834,9 @@ async def categorize_transaction(transaction_id: str, category_id: str) -> str:
         result = await client.update_transaction(
             transaction_id=transaction_id, category_id=category_id
         )
+        errors = payload_errors(result, "updateTransaction")
+        if errors:
+            return json_rejected("categorize_transaction", errors)
         return json_success(result)
     except Exception as e:
         return json_error("categorize_transaction", e)
@@ -771,6 +874,9 @@ async def update_transaction_notes(
             transaction_id=transaction_id,
             notes=formatted_notes,
         )
+        errors = payload_errors(result, "updateTransaction")
+        if errors:
+            return json_rejected("update_transaction_notes", errors)
         return json_success(result)
     except Exception as e:
         return json_error("update_transaction_notes", e)
@@ -782,6 +888,8 @@ async def mark_transaction_reviewed(transaction_id: str) -> str:
     Mark a transaction as reviewed (clears the needs_review flag).
 
     Use this after reviewing a transaction that doesn't need category changes.
+    Monarch records the signed-in user as the reviewer, as it does for a
+    review in the web app.
 
     Args:
         transaction_id: The ID of the transaction to mark as reviewed
@@ -791,13 +899,191 @@ async def mark_transaction_reviewed(transaction_id: str) -> str:
     """
     try:
         client = await get_monarch_client()
+        # needs_review=False alone clears the flag but leaves reviewedByUser
+        # and reviewedAt empty; reviewed=True records them.
         result = await client.update_transaction(
             transaction_id=transaction_id,
             needs_review=False,
+            reviewed=True,
         )
+        errors = payload_errors(result, "updateTransaction")
+        if errors:
+            return json_rejected("mark_transaction_reviewed", errors)
         return json_success(result)
     except Exception as e:
         return json_error("mark_transaction_reviewed", e)
+
+
+# Monarch's own bulk primitive, the one the web client calls when you select
+# transactions and edit them. `updates` takes the same TransactionUpdateParams
+# shape a single transaction update does, so one round trip covers a whole
+# selection whatever field is being set.
+BULK_UPDATE_TRANSACTIONS_MUTATION = gql("""
+mutation Common_BulkUpdateTransactionsMutation(
+  $selectedTransactionIds: [ID!]
+  $excludedTransactionIds: [ID!]
+  $allSelected: Boolean!
+  $expectedAffectedTransactionCount: Int!
+  $updates: TransactionUpdateParams!
+  $filters: TransactionFilterInput
+) {
+  bulkUpdateTransactions(
+    selectedTransactionIds: $selectedTransactionIds
+    excludedTransactionIds: $excludedTransactionIds
+    updates: $updates
+    allSelected: $allSelected
+    expectedAffectedTransactionCount: $expectedAffectedTransactionCount
+    filters: $filters
+  ) {
+    success
+    affectedCount
+    errors {
+      message
+    }
+  }
+}
+""")
+
+
+@mcp.tool()
+async def bulk_update_transactions(
+    transaction_ids: List[str],
+    category_id: Optional[str] = None,
+    merchant_name: Optional[str] = None,
+    notes: Optional[str] = None,
+    goal_id: Optional[str] = None,
+    needs_review: Optional[bool] = None,
+    business_entity_id: Optional[str] = None,
+    hide_from_reports: Optional[bool] = None,
+    dry_run: bool = False,
+) -> str:
+    """
+    Apply the same edit to many transactions in one request.
+
+    Uses Monarch's own bulk endpoint, the same one the web client calls when
+    you select transactions and edit them, so a set of any size costs one round
+    trip rather than one per transaction.
+
+    To merge one merchant into another, use `merge_merchants`, which also removes
+    the source record. Reassigning `merchant_name` moves only the listed
+    transactions. A name that already exists attaches to that record; a new one
+    creates it, so copy the spelling exactly.
+
+    This endpoint is all or nothing. It reports `affectedCount` for the batch
+    rather than a result per transaction, so a partial failure is not something
+    it can express. `bulk_categorize_transactions` still fans out one request
+    per transaction and does report per item, which is the reason to reach for
+    it instead when that matters.
+
+    `amount` is not offered: the bulk endpoint rejects it. `date` it would accept, but overwriting dates across a set is rarely
+    meant and cannot be undone without the original values.
+
+    Args:
+        transaction_ids: IDs of the transactions to update
+        category_id: Category to assign
+        merchant_name: Merchant name to assign
+        notes: Note to set on every transaction, replacing any existing note
+        goal_id: Goal to link
+        needs_review: True to flag them as needing review, False to clear it
+        business_entity_id: Business to assign (from get_business_entities),
+            or "none" to clear it. Requires Monarch's business feature.
+        hide_from_reports: True to hide them from reports and budgets, False
+            to show them again
+        dry_run: If True, report what would change without writing
+
+    Returns:
+        Success flag and affected count. When dry_run is True, the response
+        includes a "dry_run" flag and the planned update.
+    """
+    try:
+        if not transaction_ids:
+            return json_error(
+                "bulk_update_transactions",
+                ValueError("transaction_ids must not be empty"),
+            )
+        if merchant_name is not None:
+            require_nonblank(merchant_name, "merchant_name")
+
+        # These wire names are what TransactionUpdateParams actually accepts,
+        # confirmed against the live API by sending each one with an empty
+        # selection, where an unknown field fails validation before anything
+        # can be written. `merchant`, `hideFromReports`, `needsReview` and
+        # `amount` are all rejected: the merchant field is merchantName, the
+        # review flag is the reviewStatus enum, and hiding from reports is
+        # `hide` (confirmed the same way, 2026-11-15; `isHidden` is rejected).
+        updates: Dict[str, Any] = {}
+        if category_id is not None:
+            updates["categoryId"] = category_id
+        if merchant_name is not None:
+            updates["merchantName"] = merchant_name
+        if notes is not None:
+            updates["notes"] = notes
+        if goal_id is not None:
+            updates["goalId"] = goal_id
+        if needs_review is not None:
+            updates["reviewStatus"] = "needs_review" if needs_review else "reviewed"
+        if hide_from_reports is not None:
+            updates["hide"] = hide_from_reports
+        if business_entity_id is not None:
+            # businessEntityId confirmed against the live API (2026-09-24).
+            updates["businessEntityId"] = (
+                None if business_entity_id.strip().lower() == "none" else business_entity_id
+            )
+        # Monarch accepts an update carrying nothing and changes nothing
+        # without erroring, so an empty edit would look like a success.
+        if not updates:
+            return json_error(
+                "bulk_update_transactions",
+                ValueError("pass at least one field to change"),
+            )
+
+        if dry_run:
+            return json_success(
+                {
+                    "dry_run": True,
+                    "total": len(transaction_ids),
+                    "transaction_ids": list(transaction_ids),
+                    "updates": updates,
+                }
+            )
+
+        client = await get_monarch_client()
+        result = await client.gql_call(
+            operation="Common_BulkUpdateTransactionsMutation",
+            graphql_query=BULK_UPDATE_TRANSACTIONS_MUTATION,
+            variables={
+                "selectedTransactionIds": list(transaction_ids),
+                "excludedTransactionIds": [],
+                # allSelected drives a filter based update server side. Always
+                # False: this updates exactly the ids it was handed, never
+                # everything matching the current filters.
+                "allSelected": False,
+                "expectedAffectedTransactionCount": len(transaction_ids),
+                "updates": updates,
+                "filters": None,
+            },
+        )
+
+        payload = result.get("bulkUpdateTransactions") or {}
+        # This endpoint can report success: false with a null errors object, so
+        # the flag is checked as well rather than inferring the write took from
+        # the absence of errors.
+        errors = payload_errors(result, "bulkUpdateTransactions")
+        if errors or not payload.get("success"):
+            return json_rejected(
+                "bulk_update_transactions",
+                errors or {"message": "bulk update reported failure"},
+            )
+        return json_success(
+            {
+                "success": True,
+                "requested": len(transaction_ids),
+                "affected": payload.get("affectedCount"),
+                "updates": updates,
+            }
+        )
+    except Exception as e:
+        return json_error("bulk_update_transactions", e)
 
 
 @mcp.tool()
@@ -816,7 +1102,8 @@ async def bulk_categorize_transactions(
     Args:
         transaction_ids: List of transaction IDs to categorize
         category_id: The category ID to apply to all transactions
-        mark_reviewed: Whether to also mark transactions as reviewed (default: True)
+        mark_reviewed: Whether to also mark transactions as reviewed, recording
+            the signed-in user as the reviewer (default: True)
         dry_run: If True, return what would be updated without making changes
 
     Returns:
@@ -842,14 +1129,20 @@ async def bulk_categorize_transactions(
             "errors": [],
         }
 
-        async def _update_one(txn_id: str) -> None:
+        async def _update_one(txn_id: str) -> Any:
             update_params: Dict[str, Any] = {
                 "transaction_id": txn_id,
                 "category_id": category_id,
             }
             if mark_reviewed:
+                # Both, as in mark_transaction_reviewed: the flag alone leaves
+                # reviewedByUser / reviewedAt empty.
                 update_params["needs_review"] = False
-            await client.update_transaction(**update_params)
+                update_params["reviewed"] = True
+            # Returned, not discarded: Monarch refuses a write by putting
+            # errors in the payload of an HTTP 200, so the absence of an
+            # exception says nothing about whether anything was written.
+            return await client.update_transaction(**update_params)
 
         # Use asyncio.gather for concurrent updates
         tasks = [_update_one(txn_id) for txn_id in transaction_ids]
@@ -861,11 +1154,20 @@ async def bulk_categorize_transactions(
                 results["errors"].append(
                     {
                         "transaction_id": txn_id,
-                        "error": str(outcome),
+                        "error": format_exception(outcome),
                     }
                 )
-            else:
-                results["successful"] += 1
+                continue
+
+            errors = payload_errors(outcome, "updateTransaction")
+            if errors:
+                results["failed"] += 1
+                results["errors"].append(
+                    {"transaction_id": txn_id, "error": errors}
+                )
+                continue
+
+            results["successful"] += 1
 
         return json_success(results)
     except Exception as e:
@@ -887,45 +1189,142 @@ async def delete_transaction(transaction_id: str) -> str:
     """
     try:
         client = await get_monarch_client()
+        # Upstream delete_transaction returns a bool, not a GraphQL payload, so
+        # there is no errors object to inspect. It raises on failure, which the
+        # except below turns into an error result.
         result = await client.delete_transaction(transaction_id=transaction_id)
         return json_success(result)
     except Exception as e:
         return json_error("delete_transaction", e)
 
 
+GET_RECURRING_TRANSACTIONS_QUERY = gql(
+    """
+    query MCP_GetRecurringTransactionItems(
+      $startDate: Date!, $endDate: Date!, $includeLiabilities: Boolean
+    ) {
+      recurringTransactionItems(
+        startDate: $startDate, endDate: $endDate,
+        includeLiabilities: $includeLiabilities
+      ) {
+        date
+        amount
+        isPast
+        transactionId
+        amountDiff
+        category { id name }
+        account { id displayName }
+        stream {
+          id
+          name
+          frequency
+          amount
+          isApproximate
+          merchant { id name logoUrl }
+          creditReportLiabilityAccount {
+            id
+            account { id displayName }
+            lastStatement {
+              id
+              dueDate
+              billAmount
+              minimumPaymentAmount
+              paymentStatus
+              remainingBalance
+            }
+          }
+        }
+      }
+    }
+    """
+)
+
 @mcp.tool()
 async def get_recurring_transactions(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    include_liabilities: bool = True,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    include_metadata: bool = False,
 ) -> str:
     """
-    Get upcoming recurring transactions.
+    Get recurring merchant forecasts and synced liability bills.
 
-    Returns scheduled recurring transactions with their merchants, amounts, and accounts.
+    Includes synced credit-card and loan statements by default. Amounts remain
+    forecasts, not authoritative balances owed. The stream's latest statement
+    may have a different due date; its remaining_balance can be null or zero.
+    Merchant forecasts and liability bills may overlap and are not deduplicated.
 
     Args:
-        start_date: Start date in YYYY-MM-DD format (defaults to start of current month)
-        end_date: End date in YYYY-MM-DD format (defaults to end of current month)
+        start_date: YYYY-MM-DD; provide both dates or neither (current month start).
+        end_date: YYYY-MM-DD; defaults to current month end when both are omitted.
+        include_liabilities: Include synced liability bills (default True).
+            False requests merchant-only recurring items.
+        limit: Positive page size. Omit it to get every item in the range.
+        offset: Non-negative number of items to skip (default 0).
+        include_metadata: False keeps the legacy list. True returns an envelope
+            with data, count, args, total_count, and truncated.
 
     Returns:
-        List of upcoming recurring transactions.
+        Recurring items with legacy merchant fields, account/category/merchant
+        IDs, and stream.credit_report_liability_account containing liability
+        identity and last_statement (id, due_date, bill_amount,
+        minimum_payment_amount, payment_status, remaining_balance).
+        With limit omitted the result is the complete range. To page manually,
+        pass limit with fixed dates and include_metadata=True, and advance
+        offset by count until truncated is false.
     """
     try:
+        if (start_date is None) != (end_date is None):
+            raise ValueError("Specify both start_date and end_date, or omit both")
+        if start_date is not None and end_date is not None:
+            for value in (start_date, end_date):
+                try:
+                    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+                        raise ValueError
+                    datetime.strptime(value, "%Y-%m-%d")
+                except ValueError:
+                    raise ValueError("Dates must be valid YYYY-MM-DD values") from None
+            if start_date > end_date:
+                raise ValueError("start_date must be on or before end_date")
+        if limit is not None and (type(limit) is not int or limit <= 0):
+            raise ValueError("limit must be a positive integer")
+        if type(offset) is not int or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+
+        if start_date is None and end_date is None:
+            today = datetime.now()
+            start_date = today.replace(day=1).strftime("%Y-%m-%d")
+            end_date = today.replace(
+                day=monthrange(today.year, today.month)[1]
+            ).strftime("%Y-%m-%d")
+
         client = await get_monarch_client()
 
-        filters: Dict[str, Any] = {}
-        if start_date:
-            filters["start_date"] = start_date
-        if end_date:
-            filters["end_date"] = end_date
-
-        result = await client.get_recurring_transactions(**filters)
+        # Monarch ignores limit and offset on this field and always sends the
+        # whole range, so they are applied here instead.
+        result = await client.gql_call(
+            operation="MCP_GetRecurringTransactionItems",
+            graphql_query=GET_RECURRING_TRANSACTIONS_QUERY,
+            variables={
+                "startDate": start_date,
+                "endDate": end_date,
+                "includeLiabilities": include_liabilities,
+            },
+        )
+        all_items = result.get("recurringTransactionItems") or []
+        stop = None if limit is None else offset + limit
+        raw_items = all_items[offset:stop]
 
         recurring_list = []
-        for item in result.get("recurringTransactionItems", []):
-            recurring_info = {
+        for item in raw_items:
+            recurring_info: Dict[str, Any] = {
                 "date": item.get("date"),
                 "amount": item.get("amount"),
+                "amount_diff": item.get("amountDiff"),
+                "account_id": (item.get("account") or {}).get("id"),
+                "category_id": (item.get("category") or {}).get("id"),
                 "is_past": item.get("isPast", False),
                 "transaction_id": item.get("transactionId"),
                 "stream": (
@@ -956,8 +1355,53 @@ async def get_recurring_transactions(
                     else None
                 ),
             }
+            stream = item.get("stream")
+            if stream:
+                liability = stream.get("creditReportLiabilityAccount")
+                liability_info = None
+                if liability is not None:
+                    account = liability.get("account") or {}
+                    statement = liability.get("lastStatement")
+                    liability_info = {
+                        "id": liability.get("id"),
+                        "account_id": account.get("id"),
+                        "account": account.get("displayName"),
+                        "last_statement": (
+                            {
+                                "id": statement.get("id"),
+                                "due_date": statement.get("dueDate"),
+                                "bill_amount": statement.get("billAmount"),
+                                "minimum_payment_amount": statement.get(
+                                    "minimumPaymentAmount"
+                                ),
+                                "payment_status": statement.get("paymentStatus"),
+                                "remaining_balance": statement.get("remainingBalance"),
+                            }
+                            if statement is not None
+                            else None
+                        ),
+                    }
+                recurring_info["stream"].update(
+                    name=stream.get("name"),
+                    merchant_id=(stream.get("merchant") or {}).get("id"),
+                    credit_report_liability_account=liability_info,
+                )
             recurring_list.append(recurring_info)
 
+        if include_metadata:
+            envelope = tool_response_envelope(
+                "get_recurring_transactions",
+                {
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "include_liabilities": include_liabilities,
+                    "limit": limit,
+                    "offset": offset,
+                },
+                recurring_list,
+                total_count=len(all_items),
+            )
+            return json_success(envelope)
         return json_success(recurring_list)
     except Exception as e:
         return json_error("get_recurring_transactions", e)
@@ -970,28 +1414,54 @@ async def get_transactions_needing_review(
     uncategorized_only: bool = False,
     without_notes_only: bool = False,
     limit: int = 100,
+    offset: int = 0,
     account_id: Optional[str] = None,
+    include_hidden: bool = True,
 ) -> str:
     """
     Get transactions that need review based on various criteria.
 
     This is the primary tool for finding transactions to categorize and review.
 
+    The review filter is applied by Monarch, not locally, so the count
+    reflects the whole account rather than one arbitrary page. The response
+    is an envelope carrying count, total_count and truncated, so a partial
+    page is visible rather than looking like the complete answer.
+
+    Transactions hidden from reports are included by default, as in
+    get_transactions: Monarch leaves them out unless asked, so a hidden
+    transaction still flagged for review would otherwise never show up here.
+    Each row carries `hide_from_reports`.
+
     Args:
-        needs_review: Filter for transactions flagged as needing review (default: True)
+        needs_review: True for transactions flagged as needing review
+            (default), False for transactions already reviewed.
         days: Only include transactions from the last N days (e.g., 7 for last week)
         uncategorized_only: Only include transactions without a category assigned
         without_notes_only: Only include transactions without notes/memos
         limit: Maximum number of transactions to return (default: 100)
+        offset: Number of transactions to skip, for paging the queue
         account_id: Filter by specific account ID
+        include_hidden: Include transactions hidden from reports (default
+            True). False returns only transactions that are not hidden,
+            which is Monarch's own default.
 
     Returns:
-        List of transactions matching the criteria with full details.
+        An envelope with the matching transactions under "data".
     """
     try:
         client = await get_monarch_client()
 
-        filters: Dict[str, Any] = {"limit": limit}
+        filters: Dict[str, Any] = {"limit": limit, "offset": offset}
+
+        # Sent upstream rather than applied to an already fetched page. The
+        # previous local filter meant the tool asked for an arbitrary page of
+        # *all* transactions and reported however many of those happened to
+        # need review, with no way to tell that the page had been truncated
+        # and no offset to page past it. It also treated needs_review=False as
+        # "no filter" rather than as its inverse, so passing False returned
+        # every transaction on the page, including ones needing review.
+        filters["needs_review"] = needs_review
 
         if days:
             end = datetime.now().strftime("%Y-%m-%d")
@@ -1005,13 +1475,16 @@ async def get_transactions_needing_review(
         if without_notes_only:
             filters["has_notes"] = False
 
+        if include_hidden:
+            filters["transaction_visibility"] = ALL_TRANSACTIONS_VISIBILITY
+
         transactions_data = await client.get_transactions(**filters)
+        all_transactions = transactions_data.get("allTransactions") or {}
+        results = all_transactions.get("results") or []
+        total_count = all_transactions.get("totalCount")
 
         transaction_list = []
-        for txn in transactions_data.get("allTransactions", {}).get("results", []):
-            if needs_review and not txn.get("needsReview", False):
-                continue
-
+        for txn in results:
             if uncategorized_only:
                 category = txn.get("category")
                 if category and category.get("id"):
@@ -1019,6 +1492,38 @@ async def get_transactions_needing_review(
 
             transaction_list.append(format_transaction(txn))
 
-        return json_success(transaction_list)
+        args: Dict[str, Any] = {
+            "needs_review": needs_review,
+            "days": days,
+            "uncategorized_only": uncategorized_only,
+            "without_notes_only": without_notes_only,
+            "limit": limit,
+            "offset": offset,
+            "account_id": account_id,
+            "include_hidden": include_hidden,
+        }
+        # uncategorized_only is still applied locally, so it can shrink the
+        # page below the limit. Reporting the server side total alongside it
+        # would imply this page is complete, which it is not.
+        server_total = None if uncategorized_only else total_count
+        # Truncation must be judged on the page Monarch returned, not on what
+        # survived the local filter. Otherwise a page of 100 trimmed to 3 rows
+        # against a server total of 900 reports truncated=False, asserting
+        # completeness on 3 of 900.
+        raw_page_filled = isinstance(limit, int) and len(results) >= limit
+        envelope = tool_response_envelope(
+            "get_transactions_needing_review",
+            args,
+            transaction_list,
+            total_count=server_total,
+            search_info=(
+                {"local_filter": "uncategorized_only"}
+                if uncategorized_only
+                else None
+            ),
+        )
+        if raw_page_filled:
+            envelope["truncated"] = True
+        return json_success(envelope)
     except Exception as e:
         return json_error("get_transactions_needing_review", e)

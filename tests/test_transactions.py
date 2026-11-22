@@ -13,6 +13,7 @@ from monarch_mcp_server.tools.transactions import (
     update_transaction_notes,
     mark_transaction_reviewed,
     bulk_categorize_transactions,
+    bulk_update_transactions,
     search_transactions,
     get_transaction_details,
     delete_transaction,
@@ -24,8 +25,8 @@ class TestGetTransactionsNeedingReview:
     """Tests for get_transactions_needing_review tool."""
 
     @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
-    async def test_get_transactions_needs_review_filter(self, mock_get_client):
-        """Test filtering by needs_review flag."""
+    async def test_needs_review_flag_is_delegated_to_monarch(self, mock_get_client):
+        """The flag is sent upstream rather than applied to the page here."""
         mock_client = AsyncMock()
         mock_client.get_transactions.return_value = {
             "allTransactions": {
@@ -59,10 +60,11 @@ class TestGetTransactionsNeedingReview:
 
         result = await get_transactions_needing_review(needs_review=True)
 
-        transactions = json.loads(result)
-        assert len(transactions) == 1
-        assert transactions[0]["id"] == "txn_1"
-        assert transactions[0]["needs_review"] is True
+        # The filter is Monarch's job now, so the mocked page is returned as
+        # given. What matters is that the flag was actually sent upstream.
+        assert mock_client.get_transactions.call_args.kwargs["needs_review"] is True
+        envelope = json.loads(result)
+        assert envelope["count"] == 2
 
     @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
     async def test_get_transactions_uncategorized_filter(self, mock_get_client):
@@ -102,7 +104,8 @@ class TestGetTransactionsNeedingReview:
             needs_review=True, uncategorized_only=True
         )
 
-        transactions = json.loads(result)
+        envelope = json.loads(result)
+        transactions = envelope["data"]
         assert len(transactions) == 1
         assert transactions[0]["id"] == "txn_1"
         assert transactions[0]["category"] is None
@@ -149,7 +152,7 @@ class TestGetTransactionsNeedingReview:
 
         result = await get_transactions_needing_review(needs_review=True)
 
-        transactions = json.loads(result)
+        transactions = json.loads(result)["data"]
         assert len(transactions) == 1
         txn = transactions[0]
         assert txn["id"] == "txn_1"
@@ -185,8 +188,9 @@ class TestGetTransactionsNeedingReview:
 
         result = await get_transactions_needing_review()
 
-        transactions = json.loads(result)
-        assert len(transactions) == 0
+        envelope = json.loads(result)
+        assert envelope["count"] == 0
+        assert envelope["data"] == []
 
 
 class TestUpdateTransactionNotes:
@@ -256,6 +260,8 @@ class TestMarkTransactionReviewed:
         call_kwargs = mock_client.update_transaction.call_args.kwargs
         assert call_kwargs["transaction_id"] == "txn_123"
         assert call_kwargs["needs_review"] is False
+        # Without it Monarch clears the flag but records no reviewer.
+        assert call_kwargs["reviewed"] is True
 
         data = json.loads(result)
         assert "updateTransaction" in data
@@ -296,6 +302,9 @@ class TestBulkCategorizeTransactions:
 
         # Verify update_transaction was called 3 times
         assert mock_client.update_transaction.call_count == 3
+        for c in mock_client.update_transaction.call_args_list:
+            assert c.kwargs["needs_review"] is False
+            assert c.kwargs["reviewed"] is True
 
     @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
     async def test_bulk_categorize_partial_failure(self, mock_get_client):
@@ -333,6 +342,7 @@ class TestBulkCategorizeTransactions:
 
         call_kwargs = mock_client.update_transaction.call_args.kwargs
         assert "needs_review" not in call_kwargs
+        assert "reviewed" not in call_kwargs
 
     @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
     async def test_bulk_categorize_empty_list(self, mock_get_client):
@@ -506,6 +516,9 @@ class TestGetTransactionDetails:
                 "splits": [],
             }
         }
+        mock_client.gql_call.return_value = {
+            "getTransaction": {"id": "txn_123", "businessEntity": None}
+        }
         mock_get_client.return_value = mock_client
 
         result = await get_transaction_details(transaction_id="txn_123")
@@ -516,6 +529,67 @@ class TestGetTransactionDetails:
 
         data = json.loads(result)
         assert "getTransaction" in data
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_get_details_merges_business_entity(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_client.get_transaction_details.return_value = {
+            "getTransaction": {"id": "txn_123", "amount": -2500.0, "attachments": []}
+        }
+        mock_client.gql_call.return_value = {"getTransaction": {
+            "id": "txn_123",
+            "businessEntity": {"id": "biz_1", "name": "Zinala Baking Supply"},
+        }}
+        mock_get_client.return_value = mock_client
+
+        txn = json.loads(await get_transaction_details("txn_123"))["getTransaction"]
+
+        assert txn["businessEntity"] == {"id": "biz_1", "name": "Zinala Baking Supply"}
+        assert txn["amount"] == -2500.0
+        # Must resolve the same record the drawer query did.
+        variables = mock_client.gql_call.call_args.kwargs["variables"]
+        assert variables == {"id": "txn_123", "redirectPosted": True}
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_get_details_personal_transaction_has_null_business(
+        self, mock_get_client
+    ):
+        mock_client = AsyncMock()
+        mock_client.get_transaction_details.return_value = {
+            "getTransaction": {"id": "txn_9"}
+        }
+        mock_client.gql_call.return_value = {
+            "getTransaction": {"id": "txn_9", "businessEntity": None}
+        }
+        mock_get_client.return_value = mock_client
+
+        txn = json.loads(await get_transaction_details("txn_9"))["getTransaction"]
+
+        assert "businessEntity" in txn
+        assert txn["businessEntity"] is None
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_business_entity_failure_does_not_fail_the_whole_read(
+        self, mock_get_client
+    ):
+        """Businesses are a plan feature, so the follow-up query can fail on an
+        account that works fine otherwise. Details the drawer query already
+        returned must still come back."""
+        mock_client = AsyncMock()
+        mock_client.get_transaction_details.return_value = {
+            "getTransaction": {"id": "txn_7", "amount": -42.0, "notes": "keep me"}
+        }
+        mock_client.gql_call.side_effect = RuntimeError(
+            "Cannot query field 'businessEntity' on type 'Transaction'"
+        )
+        mock_get_client.return_value = mock_client
+
+        data = json.loads(await get_transaction_details("txn_7"))
+
+        assert "error" not in data
+        txn = data["getTransaction"]
+        assert txn["amount"] == -42.0
+        assert txn["notes"] == "keep me"
 
     @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
     async def test_get_details_error(self, mock_get_client):
@@ -567,7 +641,7 @@ class TestGetRecurringTransactions:
     async def test_get_recurring_success(self, mock_get_client):
         """Test successful retrieval of recurring transactions."""
         mock_client = AsyncMock()
-        mock_client.get_recurring_transactions.return_value = {
+        mock_client.gql_call.return_value = {
             "recurringTransactionItems": [
                 {
                     "date": "2024-02-01",
@@ -600,16 +674,16 @@ class TestGetRecurringTransactions:
     async def test_get_recurring_with_dates(self, mock_get_client):
         """Test with custom date range."""
         mock_client = AsyncMock()
-        mock_client.get_recurring_transactions.return_value = {
+        mock_client.gql_call.return_value = {
             "recurringTransactionItems": []
         }
         mock_get_client.return_value = mock_client
 
         await get_recurring_transactions(start_date="2024-02-01", end_date="2024-02-29")
 
-        call_kwargs = mock_client.get_recurring_transactions.call_args.kwargs
-        assert call_kwargs["start_date"] == "2024-02-01"
-        assert call_kwargs["end_date"] == "2024-02-29"
+        variables = mock_client.gql_call.call_args.kwargs["variables"]
+        assert variables["startDate"] == "2024-02-01"
+        assert variables["endDate"] == "2024-02-29"
 
     @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
     async def test_get_recurring_error(self, mock_get_client):
@@ -715,42 +789,64 @@ class TestGetTransactions:
             offset=5,
             start_date="2026-03-01",
             account_ids=["acc-1"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_account_id_backward_compat(self, mock_monarch_client):
         await get_transactions(account_id="acc-1")
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, account_ids=["acc-1"]
+            limit=100,
+            offset=0,
+            account_ids=["acc-1"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_account_id_merged_with_account_ids(self, mock_monarch_client):
         await get_transactions(account_id="acc-1", account_ids=["acc-2"])
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, account_ids=["acc-2", "acc-1"]
+            limit=100,
+            offset=0,
+            account_ids=["acc-2", "acc-1"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_account_id_not_duplicated(self, mock_monarch_client):
         await get_transactions(account_id="acc-1", account_ids=["acc-1"])
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, account_ids=["acc-1"]
+            limit=100,
+            offset=0,
+            account_ids=["acc-1"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_search_filter(self, mock_monarch_client):
         await get_transactions(search="order-123")
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, search="order-123"
+            limit=100,
+            offset=0,
+            search="order-123",
+            transaction_visibility="all_transactions",
         )
 
     async def test_boolean_filters(self, mock_monarch_client):
         await get_transactions(has_notes=True, is_split=False, is_recurring=True)
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, has_notes=True, is_split=False, is_recurring=True
+            limit=100,
+            offset=0,
+            has_notes=True,
+            is_split=False,
+            is_recurring=True,
+            transaction_visibility="all_transactions",
         )
 
     async def test_list_filters(self, mock_monarch_client):
         await get_transactions(category_ids=["cat-1"], tag_ids=["tag-1", "tag-2"])
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, category_ids=["cat-1"], tag_ids=["tag-1", "tag-2"]
+            limit=100,
+            offset=0,
+            category_ids=["cat-1"],
+            tag_ids=["tag-1", "tag-2"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_category_group_filter_expands_to_categories(
@@ -758,13 +854,19 @@ class TestGetTransactions:
     ):
         await get_transactions(category_group_ids=["grp-1"])
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, category_ids=["cat-1", "cat-2"]
+            limit=100,
+            offset=0,
+            category_ids=["cat-1", "cat-2"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_category_group_filter_merges_category_ids(self, mock_monarch_client):
         await get_transactions(category_ids=["cat-3"], category_group_ids=["grp-1"])
         mock_monarch_client.get_transactions.assert_called_once_with(
-            limit=100, offset=0, category_ids=["cat-3", "cat-1", "cat-2"]
+            limit=100,
+            offset=0,
+            category_ids=["cat-3", "cat-1", "cat-2"],
+            transaction_visibility="all_transactions",
         )
 
     async def test_category_group_filter_with_no_matches_returns_empty(
@@ -802,8 +904,17 @@ class TestGetTransactions:
         assert result["search"]["scan_limit"] == 200
         mock_monarch_client.get_transactions.assert_has_calls(
             [
-                call(limit=10, offset=0, search="whole foods"),
-                call(limit=200, offset=0),
+                call(
+                    limit=10,
+                    offset=0,
+                    search="whole foods",
+                    transaction_visibility="all_transactions",
+                ),
+                call(
+                    limit=200,
+                    offset=0,
+                    transaction_visibility="all_transactions",
+                ),
             ]
         )
 
@@ -833,8 +944,17 @@ class TestGetTransactions:
         assert result["search"]["server_error"] == "server search failed"
         mock_monarch_client.get_transactions.assert_has_calls(
             [
-                call(limit=10, offset=0, search="WHOLE"),
-                call(limit=200, offset=0),
+                call(
+                    limit=10,
+                    offset=0,
+                    search="WHOLE",
+                    transaction_visibility="all_transactions",
+                ),
+                call(
+                    limit=200,
+                    offset=0,
+                    transaction_visibility="all_transactions",
+                ),
             ]
         )
 
@@ -933,6 +1053,18 @@ class TestCreateTransaction:
         )
         assert "create_transaction" in result
 
+    async def test_a_blank_merchant_name_is_refused(self, mock_monarch_client):
+        """Monarch would make a junk merchant out of a whitespace-only name."""
+        result = await create_transaction(
+            date="2026-03-15",
+            account_id="acc-1",
+            amount=-25.00,
+            merchant_name="   ",
+            category_id="cat-1",
+        )
+        assert json.loads(result)["error"] is True
+        mock_monarch_client.create_transaction.assert_not_called()
+
 
 class TestUpdateTransaction:
     async def test_updates_transaction(self):
@@ -945,6 +1077,38 @@ class TestUpdateTransaction:
             transaction_id="txn-1", amount=99.99, notes="Updated"
         )
 
+    @pytest.mark.parametrize("owner_user_id", ["user-1", ""])
+    async def test_passes_owner(self, mock_monarch_client, owner_user_id):
+        result = json.loads(
+            await update_transaction("txn-1", owner_user_id=owner_user_id)
+        )
+        assert result == {"updateTransaction": {"transaction": {"id": "txn-1"}}}
+        mock_monarch_client.update_transaction.assert_awaited_once_with(
+            transaction_id="txn-1", owner_user_id=owner_user_id
+        )
+
+    async def test_none_preserves_owner(self, mock_monarch_client):
+        await update_transaction("txn-1", category_id="cat-1", owner_user_id=None)
+        mock_monarch_client.update_transaction.assert_called_once_with(
+            transaction_id="txn-1", category_id="cat-1"
+        )
+
+    @pytest.mark.parametrize("owner_user_id", ["unknown-user", ""])
+    async def test_owner_rejection_is_not_success(
+        self, mock_monarch_client, owner_user_id
+    ):
+        mock_monarch_client.update_transaction.return_value = {
+            "updateTransaction": {
+                "transaction": None,
+                "errors": {"message": "Owner update rejected", "code": "INVALID"},
+            }
+        }
+        result = json.loads(
+            await update_transaction("txn-1", owner_user_id=owner_user_id)
+        )
+        assert result["success"] is False
+        assert "Owner update rejected" in json.dumps(result)
+
     async def test_passes_all_fields(self, mock_monarch_client):
         await update_transaction(
             "txn-1",
@@ -956,6 +1120,7 @@ class TestUpdateTransaction:
             hide_from_reports=True,
             needs_review=False,
             notes="All fields",
+            owner_user_id="user-1",
         )
         mock_monarch_client.update_transaction.assert_called_once_with(
             transaction_id="txn-1",
@@ -966,13 +1131,35 @@ class TestUpdateTransaction:
             date="2026-04-01",
             hide_from_reports=True,
             needs_review=False,
+            reviewed=True,
             notes="All fields",
+            owner_user_id="user-1",
+        )
+
+    async def test_flagging_for_review_does_not_send_reviewed(self, mock_monarch_client):
+        """reviewed=True records a reviewer; it belongs only to clearing the flag."""
+        await update_transaction("txn-1", needs_review=True)
+        mock_monarch_client.update_transaction.assert_called_once_with(
+            transaction_id="txn-1", needs_review=True
         )
 
     async def test_handles_api_error(self, mock_monarch_client):
         mock_monarch_client.update_transaction.side_effect = Exception("Not found")
         result = await update_transaction("bad-id")
         assert "update_transaction" in result
+
+    async def test_a_blank_merchant_name_is_refused(self, mock_monarch_client):
+        """Renaming a merchant to whitespace would orphan the transaction."""
+        result = await update_transaction("txn-1", merchant_name="   ")
+        assert json.loads(result)["error"] is True
+        mock_monarch_client.update_transaction.assert_not_called()
+
+    async def test_an_omitted_merchant_name_is_still_allowed(self, mock_monarch_client):
+        """The guard must not turn 'leave the merchant alone' into an error."""
+        await update_transaction("txn-1", notes="No merchant here")
+        mock_monarch_client.update_transaction.assert_called_once_with(
+            transaction_id="txn-1", notes="No merchant here"
+        )
 
 
 class TestCategorizeTransaction:
@@ -987,3 +1174,661 @@ class TestCategorizeTransaction:
         mock_monarch_client.update_transaction.side_effect = Exception("boom")
         result = await categorize_transaction("txn-1", "cat-2")
         assert "categorize_transaction" in result
+
+
+class TestRejectedWritesAreNotReportedAsSuccess:
+    """gql_call raises on transport and top level GraphQL errors.
+
+    Monarch refuses a mutation differently: errors come back inside the
+    payload of an HTTP 200. Treating "no exception" as success reports writes
+    that never happened, which is worse than failing, because the caller marks
+    the work done and moves on.
+    """
+
+    REJECTION = {
+        "updateTransaction": {
+            "transaction": None,
+            "errors": {"message": "Category not found", "code": "INVALID"},
+        }
+    }
+
+    async def test_categorize_transaction(self, mock_monarch_client):
+        mock_monarch_client.update_transaction.return_value = self.REJECTION
+        result = json.loads(await categorize_transaction("txn-1", "bogus"))
+        assert result["success"] is False
+        assert "Category not found" in json.dumps(result)
+
+    async def test_mark_transaction_reviewed(self, mock_monarch_client):
+        mock_monarch_client.update_transaction.return_value = self.REJECTION
+        result = json.loads(await mark_transaction_reviewed("txn-1"))
+        assert result["success"] is False
+
+    async def test_update_transaction_notes(self, mock_monarch_client):
+        mock_monarch_client.update_transaction.return_value = self.REJECTION
+        result = json.loads(await update_transaction_notes("txn-1", "note"))
+        assert result["success"] is False
+
+    async def test_update_transaction(self, mock_monarch_client):
+        mock_monarch_client.update_transaction.return_value = self.REJECTION
+        result = json.loads(await update_transaction("txn-1", category_id="x"))
+        assert result["success"] is False
+
+    async def test_bulk_categorize_counts_rejections_as_failures(
+        self, mock_monarch_client
+    ):
+        """The whole batch was reported as categorized while nothing was."""
+        mock_monarch_client.update_transaction.return_value = self.REJECTION
+        result = json.loads(
+            await bulk_categorize_transactions(["1", "2", "3"], "bogus")
+        )
+        assert result["successful"] == 0
+        assert result["failed"] == 3
+        assert len(result["errors"]) == 3
+
+    async def test_bulk_categorize_still_counts_real_successes(
+        self, mock_monarch_client
+    ):
+        mock_monarch_client.update_transaction.return_value = {
+            "updateTransaction": {"transaction": {"id": "1"}, "errors": None}
+        }
+        result = json.loads(
+            await bulk_categorize_transactions(["1", "2"], "cat-1")
+        )
+        assert result["successful"] == 2
+        assert result["failed"] == 0
+
+    async def test_bulk_categorize_error_text_is_never_blank(
+        self, mock_monarch_client
+    ):
+        """Some transport exceptions stringify to the empty string."""
+
+        class Silent(Exception):
+            def __str__(self):
+                return ""
+
+        mock_monarch_client.update_transaction.side_effect = Silent()
+        result = json.loads(await bulk_categorize_transactions(["1"], "cat-1"))
+        assert result["failed"] == 1
+        assert result["errors"][0]["error"]
+
+
+class TestReviewQueueFiltersServerSide:
+    """The review filter must be Monarch's job, not a local pass over one page.
+
+    Filtering locally meant the tool asked for an arbitrary page of all
+    transactions and reported however many of those happened to need review,
+    with nothing in the response saying the page was truncated and no offset
+    to page past it.
+    """
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_needs_review_is_sent_upstream(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_client.get_transactions.return_value = {
+            "allTransactions": {"results": [], "totalCount": 0}
+        }
+        mock_get_client.return_value = mock_client
+
+        await get_transactions_needing_review()
+
+        assert mock_client.get_transactions.call_args.kwargs["needs_review"] is True
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_needs_review_false_inverts_rather_than_disabling(
+        self, mock_get_client
+    ):
+        """False used to mean "no filter", returning the very rows it excluded."""
+        mock_client = AsyncMock()
+        mock_client.get_transactions.return_value = {
+            "allTransactions": {"results": [], "totalCount": 0}
+        }
+        mock_get_client.return_value = mock_client
+
+        await get_transactions_needing_review(needs_review=False)
+
+        assert mock_client.get_transactions.call_args.kwargs["needs_review"] is False
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_truncation_is_visible_to_the_caller(self, mock_get_client):
+        """A full page against a much larger total must not look complete."""
+        mock_client = AsyncMock()
+        mock_client.get_transactions.return_value = {
+            "allTransactions": {
+                "results": [
+                    {"id": f"txn_{i}", "date": "2024-01-15", "amount": -1.0}
+                    for i in range(3)
+                ],
+                "totalCount": 5000,
+            }
+        }
+        mock_get_client.return_value = mock_client
+
+        envelope = json.loads(await get_transactions_needing_review(limit=3))
+
+        assert envelope["count"] == 3
+        assert envelope["total_count"] == 5000
+        assert envelope["truncated"] is True
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_offset_pages_the_queue(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_client.get_transactions.return_value = {
+            "allTransactions": {"results": [], "totalCount": 0}
+        }
+        mock_get_client.return_value = mock_client
+
+        await get_transactions_needing_review(offset=100)
+
+        assert mock_client.get_transactions.call_args.kwargs["offset"] == 100
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_local_uncategorized_filter_does_not_claim_a_server_total(
+        self, mock_get_client
+    ):
+        """uncategorized_only still shrinks the page after the fact.
+
+        Reporting the server side total next to it would imply the page is
+        the complete set of uncategorized rows, which it is not.
+        """
+        mock_client = AsyncMock()
+        mock_client.get_transactions.return_value = {
+            "allTransactions": {
+                "results": [
+                    {"id": "a", "category": None},
+                    {"id": "b", "category": {"id": "c1", "name": "Groceries"}},
+                ],
+                "totalCount": 900,
+            }
+        }
+        mock_get_client.return_value = mock_client
+
+        envelope = json.loads(
+            await get_transactions_needing_review(uncategorized_only=True)
+        )
+
+        assert envelope["count"] == 1
+        assert envelope["total_count"] is None
+        assert envelope["search"] == {"local_filter": "uncategorized_only"}
+
+
+class TestTruncationIsHonestUnderLocalFiltering:
+    """uncategorized_only shrinks the page after the fact.
+
+    That drops `count` below `limit`, which defeats the envelope's fallback
+    and asserted completeness on a page that was in fact truncated.
+    """
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_full_page_trimmed_by_local_filter_is_still_truncated(
+        self, mock_get_client
+    ):
+        mock_client = AsyncMock()
+        mock_client.get_transactions.return_value = {
+            "allTransactions": {
+                "results": [
+                    {"id": f"t{i}", "category": None if i < 3 else {"id": "c1"}}
+                    for i in range(100)
+                ],
+                "totalCount": 900,
+            }
+        }
+        mock_get_client.return_value = mock_client
+
+        envelope = json.loads(
+            await get_transactions_needing_review(limit=100, uncategorized_only=True)
+        )
+        assert envelope["count"] == 3
+        assert envelope["truncated"] is True, (
+            "3 rows kept from a full page against 900 must not read as complete"
+        )
+
+    @patch("monarch_mcp_server.tools.transactions.get_monarch_client")
+    async def test_short_page_is_not_marked_truncated(self, mock_get_client):
+        mock_client = AsyncMock()
+        mock_client.get_transactions.return_value = {
+            "allTransactions": {
+                "results": [{"id": "t1", "category": None}],
+                "totalCount": 1,
+            }
+        }
+        mock_get_client.return_value = mock_client
+
+        envelope = json.loads(
+            await get_transactions_needing_review(limit=100, uncategorized_only=True)
+        )
+        assert envelope["truncated"] is False
+
+
+class TestCreateTransactionReportsRejection:
+    async def test_refused_creation_is_not_reported_as_success(
+        self, mock_monarch_client
+    ):
+        mock_monarch_client.create_transaction.return_value = {
+            "createTransaction": {
+                "transaction": None,
+                "errors": {"message": "Invalid account", "code": "INVALID"},
+            }
+        }
+        result = json.loads(
+            await create_transaction(
+                date="2026-01-01",
+                account_id="acc-1",
+                amount=-5.0,
+                merchant_name="X",
+                category_id="cat-1",
+            )
+        )
+        assert result["success"] is False
+        assert "Invalid account" in json.dumps(result)
+
+
+class TestBulkUpdateTransactions:
+    """Tests for bulk_update_transactions tool."""
+
+    @staticmethod
+    def _ok(affected):
+        return {
+            "bulkUpdateTransactions": {
+                "success": True,
+                "affectedCount": affected,
+                "errors": None,
+            }
+        }
+
+    async def test_one_request_covers_the_whole_set(self, mock_monarch_client):
+        """The point of the endpoint: not one call per transaction."""
+        mock_monarch_client.gql_call.return_value = self._ok(3)
+
+        data = json.loads(
+            await bulk_update_transactions(
+                transaction_ids=["txn_1", "txn_2", "txn_3"],
+                merchant_name="Walmart",
+            )
+        )
+        assert mock_monarch_client.gql_call.call_count == 1
+        mock_monarch_client.update_transaction.assert_not_called()
+        assert data["success"] is True
+        assert data["requested"] == 3
+        assert data["affected"] == 3
+
+    async def test_arguments_map_to_the_wire_names(self, mock_monarch_client):
+        """merchantName and categoryId are what the API accepts, not our names."""
+        mock_monarch_client.gql_call.return_value = self._ok(1)
+
+        await bulk_update_transactions(
+            transaction_ids=["txn_1"],
+            merchant_name="Walmart",
+            category_id="cat_1",
+            notes="tidied",
+        )
+        updates = mock_monarch_client.gql_call.call_args.kwargs["variables"]["updates"]
+        assert updates == {
+            "categoryId": "cat_1",
+            "merchantName": "Walmart",
+            "notes": "tidied",
+        }
+
+    async def test_needs_review_becomes_the_review_status_enum(
+        self, mock_monarch_client
+    ):
+        """There is no needsReview field; the API takes a lowercase enum."""
+        mock_monarch_client.gql_call.return_value = self._ok(1)
+
+        await bulk_update_transactions(transaction_ids=["txn_1"], needs_review=False)
+        updates = mock_monarch_client.gql_call.call_args.kwargs["variables"]["updates"]
+        assert updates == {"reviewStatus": "reviewed"}
+
+        await bulk_update_transactions(transaction_ids=["txn_1"], needs_review=True)
+        updates = mock_monarch_client.gql_call.call_args.kwargs["variables"]["updates"]
+        assert updates == {"reviewStatus": "needs_review"}
+
+    async def test_hide_from_reports_is_sent_as_hide(self, mock_monarch_client):
+        """hideFromReports is rejected by TransactionUpdateParams; hide is the field."""
+        mock_monarch_client.gql_call.return_value = self._ok(2)
+
+        await bulk_update_transactions(
+            transaction_ids=["txn_1", "txn_2"], hide_from_reports=True
+        )
+        updates = mock_monarch_client.gql_call.call_args.kwargs["variables"]["updates"]
+        assert updates == {"hide": True}
+
+        await bulk_update_transactions(
+            transaction_ids=["txn_1", "txn_2"], hide_from_reports=False
+        )
+        updates = mock_monarch_client.gql_call.call_args.kwargs["variables"]["updates"]
+        assert updates == {"hide": False}
+
+    async def test_all_selected_is_never_true(self, mock_monarch_client):
+        """True updates everything matching filters, not the listed ids."""
+        mock_monarch_client.gql_call.return_value = self._ok(2)
+
+        await bulk_update_transactions(
+            transaction_ids=["txn_1", "txn_2"], merchant_name="Walmart"
+        )
+        variables = mock_monarch_client.gql_call.call_args.kwargs["variables"]
+        assert variables["allSelected"] is False
+        assert variables["filters"] is None
+        assert variables["expectedAffectedTransactionCount"] == 2
+        assert variables["selectedTransactionIds"] == ["txn_1", "txn_2"]
+
+    async def test_a_false_success_is_a_failure_even_without_errors(
+        self, mock_monarch_client
+    ):
+        """This endpoint can report success: false with a null errors object."""
+        mock_monarch_client.gql_call.return_value = {
+            "bulkUpdateTransactions": {
+                "success": False,
+                "affectedCount": 0,
+                "errors": None,
+            }
+        }
+
+        data = json.loads(
+            await bulk_update_transactions(
+                transaction_ids=["txn_1"], merchant_name="Walmart"
+            )
+        )
+        assert data["success"] is False
+
+    async def test_a_rejection_is_reported_even_when_success_is_true(
+        self, mock_monarch_client
+    ):
+        """An errors object outweighs the flag; payload_errors normalises it."""
+        mock_monarch_client.gql_call.return_value = {
+            "bulkUpdateTransactions": {
+                "success": True,
+                "affectedCount": 0,
+                "errors": {"message": "Invalid category"},
+            }
+        }
+
+        data = json.loads(
+            await bulk_update_transactions(
+                transaction_ids=["txn_1"], category_id="nope"
+            )
+        )
+        assert data["success"] is False
+        assert "Invalid category" in json.dumps(data)
+
+    async def test_an_empty_update_is_refused(self, mock_monarch_client):
+        """Monarch accepts a no-op silently, which would look like success."""
+        data = json.loads(await bulk_update_transactions(transaction_ids=["txn_1"]))
+        assert data["error"] is True
+        mock_monarch_client.gql_call.assert_not_called()
+
+    async def test_an_empty_selection_is_refused(self, mock_monarch_client):
+        data = json.loads(
+            await bulk_update_transactions(transaction_ids=[], merchant_name="Walmart")
+        )
+        assert data["error"] is True
+        mock_monarch_client.gql_call.assert_not_called()
+
+    async def test_a_blank_merchant_name_is_refused(self, mock_monarch_client):
+        data = json.loads(
+            await bulk_update_transactions(
+                transaction_ids=["txn_1"], merchant_name="   "
+            )
+        )
+        assert data["error"] is True
+        mock_monarch_client.gql_call.assert_not_called()
+
+    async def test_dry_run_writes_nothing(self, mock_monarch_client):
+        data = json.loads(
+            await bulk_update_transactions(
+                transaction_ids=["txn_1", "txn_2"],
+                merchant_name="Walmart",
+                dry_run=True,
+            )
+        )
+        assert data["dry_run"] is True
+        assert data["total"] == 2
+        assert data["updates"] == {"merchantName": "Walmart"}
+        mock_monarch_client.gql_call.assert_not_called()
+
+
+def _hidden_transaction_page():
+    """One visible and one hidden row. Synthetic data only."""
+    return {
+        "allTransactions": {
+            "results": [
+                {
+                    "id": "txn-visible-1",
+                    "date": "2026-02-10",
+                    "amount": -12.00,
+                    "description": "Example Store",
+                    "category": {"id": "cat-1", "name": "Groceries"},
+                    "account": {"id": "acc-test-1", "displayName": "Test Checking"},
+                    "merchant": {"id": "mer-1", "name": "Example Store"},
+                    "needsReview": True,
+                    "hideFromReports": False,
+                    "tags": [],
+                },
+                {
+                    "id": "txn-hidden-1",
+                    "date": "2026-02-11",
+                    "amount": -30.00,
+                    "description": "Wallet Top Up",
+                    "category": {"id": "cat-9", "name": "Transfer"},
+                    "account": {"id": "acc-test-1", "displayName": "Test Checking"},
+                    "merchant": {"id": "mer-2", "name": "Example Wallet"},
+                    "needsReview": True,
+                    "hideFromReports": True,
+                    "tags": [],
+                },
+            ],
+            "totalCount": 2,
+        }
+    }
+
+
+class TestHiddenTransactionsAreNotSilentlyDropped:
+    """Monarch omits transactions hidden from reports unless asked.
+
+    The library's `transaction_visibility=None` means "only transactions that
+    are not hidden". Leaving it unset made get_transactions drop every hidden
+    row with nothing in the response to say so, which can make an account look
+    as if part of it were missing.
+    """
+
+    # get_transactions
+
+    async def test_get_transactions_includes_hidden_by_default(
+        self, mock_monarch_client
+    ):
+        mock_monarch_client.get_transactions.return_value = _hidden_transaction_page()
+
+        envelope = json.loads(await get_transactions(account_ids=["acc-test-1"]))
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert kwargs["transaction_visibility"] == "all_transactions"
+        assert envelope["args"]["include_hidden"] is True
+        hidden = {row["id"]: row["hide_from_reports"] for row in envelope["data"]}
+        assert hidden == {"txn-visible-1": False, "txn-hidden-1": True}
+
+    async def test_get_transactions_include_hidden_true_is_explicit(
+        self, mock_monarch_client
+    ):
+        await get_transactions(include_hidden=True)
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert kwargs["transaction_visibility"] == "all_transactions"
+
+    async def test_get_transactions_include_hidden_false_keeps_monarch_default(
+        self, mock_monarch_client
+    ):
+        envelope = json.loads(await get_transactions(include_hidden=False))
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert "transaction_visibility" not in kwargs
+        assert envelope["args"]["include_hidden"] is False
+
+    @pytest.mark.parametrize(
+        "include_hidden, expected",
+        [(True, "all_transactions"), (False, None)],
+    )
+    async def test_wide_search_fallback_on_empty_results_keeps_visibility(
+        self, mock_monarch_client, include_hidden, expected
+    ):
+        mock_monarch_client.get_transactions.side_effect = [
+            {"allTransactions": {"results": []}},
+            _hidden_transaction_page(),
+        ]
+
+        envelope = json.loads(
+            await get_transactions(
+                search="wallet",
+                wide_search=True,
+                include_hidden=include_hidden,
+            )
+        )
+
+        assert envelope["search"]["strategy"] == "wide"
+        assert envelope["search"]["fallback_reason"] == "empty_server_results"
+        calls = mock_monarch_client.get_transactions.call_args_list
+        assert len(calls) == 2
+        for c in calls:
+            assert c.kwargs.get("transaction_visibility") == expected
+        # The fallback drops the search text and nothing else.
+        assert "search" not in calls[1].kwargs
+        if include_hidden:
+            # The local scan matches the hidden row's description.
+            assert [row["id"] for row in envelope["data"]] == ["txn-hidden-1"]
+            assert envelope["data"][0]["hide_from_reports"] is True
+
+    @pytest.mark.parametrize(
+        "include_hidden, expected",
+        [(True, "all_transactions"), (False, None)],
+    )
+    async def test_wide_search_fallback_on_server_error_keeps_visibility(
+        self, mock_monarch_client, include_hidden, expected
+    ):
+        mock_monarch_client.get_transactions.side_effect = [
+            Exception("server search failed"),
+            _hidden_transaction_page(),
+        ]
+
+        envelope = json.loads(
+            await get_transactions(
+                search="wallet",
+                wide_search=True,
+                include_hidden=include_hidden,
+            )
+        )
+
+        assert envelope["search"]["strategy"] == "wide"
+        assert envelope["search"]["fallback_reason"] == "server_error"
+        calls = mock_monarch_client.get_transactions.call_args_list
+        assert len(calls) == 2
+        for c in calls:
+            assert c.kwargs.get("transaction_visibility") == expected
+
+    async def test_empty_category_group_result_reports_include_hidden(
+        self, mock_monarch_client
+    ):
+        envelope = json.loads(
+            await get_transactions(
+                category_group_ids=["grp-missing"], include_hidden=False
+            )
+        )
+
+        assert envelope["args"]["include_hidden"] is False
+        mock_monarch_client.get_transactions.assert_not_called()
+
+    # search_transactions
+
+    async def test_search_without_hidden_filter_returns_both_kinds(
+        self, mock_monarch_client
+    ):
+        mock_monarch_client.get_transactions.return_value = _hidden_transaction_page()
+
+        rows = json.loads(await search_transactions(search="example"))
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert kwargs["transaction_visibility"] == "all_transactions"
+        assert "hidden_from_reports" not in kwargs
+        assert {row["id"] for row in rows} == {"txn-visible-1", "txn-hidden-1"}
+
+    @pytest.mark.parametrize("hidden_from_reports", [True, False])
+    async def test_explicit_hidden_filter_is_sent_unchanged(
+        self, mock_monarch_client, hidden_from_reports
+    ):
+        """True and False keep their meaning: no visibility override is sent."""
+        await search_transactions(hidden_from_reports=hidden_from_reports)
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert kwargs["hidden_from_reports"] is hidden_from_reports
+        assert "transaction_visibility" not in kwargs
+
+    # get_transactions_needing_review
+
+    async def test_review_queue_includes_hidden_by_default(self, mock_monarch_client):
+        mock_monarch_client.get_transactions.return_value = _hidden_transaction_page()
+
+        envelope = json.loads(await get_transactions_needing_review())
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert kwargs["transaction_visibility"] == "all_transactions"
+        assert kwargs["needs_review"] is True
+        assert envelope["args"]["include_hidden"] is True
+        hidden = {row["id"]: row["hide_from_reports"] for row in envelope["data"]}
+        assert hidden == {"txn-visible-1": False, "txn-hidden-1": True}
+
+    async def test_review_queue_include_hidden_false_keeps_monarch_default(
+        self, mock_monarch_client
+    ):
+        envelope = json.loads(
+            await get_transactions_needing_review(include_hidden=False)
+        )
+
+        kwargs = mock_monarch_client.get_transactions.call_args.kwargs
+        assert "transaction_visibility" not in kwargs
+        assert kwargs["needs_review"] is True
+        assert envelope["args"]["include_hidden"] is False
+
+
+def _listing_rows():
+    base = {
+        "date": "2026-10-14",
+        "amount": -2500.0,
+        "merchant": {"id": "m1", "name": "Managego"},
+        "category": {"id": "cat_rent", "name": "Rent"},
+        "account": {"id": "acc_1", "displayName": "Checking"},
+    }
+    return [
+        {**base, "id": "txn_biz",
+         "businessEntity": {"id": "biz_1", "name": "Zinala Baking Supply",
+                            "__typename": "BusinessEntity"}},
+        {**base, "id": "txn_personal", "businessEntity": None},
+    ]
+
+
+class TestBusinessEntityInListings:
+    """Listing tools surface the business entity Monarch already returns."""
+
+    @staticmethod
+    def _assert_business(rows):
+        by_id = {r["id"]: r for r in rows}
+        assert by_id["txn_biz"]["business_entity"] == "Zinala Baking Supply"
+        assert by_id["txn_biz"]["business_entity_id"] == "biz_1"
+        assert by_id["txn_personal"]["business_entity"] is None
+        assert by_id["txn_personal"]["business_entity_id"] is None
+
+    async def test_get_transactions(self, mock_monarch_client):
+        mock_monarch_client.get_transactions.return_value = {
+            "allTransactions": {"results": _listing_rows(), "totalCount": 2}
+        }
+        self._assert_business(json.loads(await get_transactions())["data"])
+
+    async def test_search_transactions(self, mock_monarch_client):
+        mock_monarch_client.get_transactions.return_value = {
+            "allTransactions": {"results": _listing_rows()}
+        }
+        self._assert_business(json.loads(await search_transactions(search="managego")))
+
+    async def test_needing_review(self, mock_monarch_client):
+        mock_monarch_client.get_transactions.return_value = {
+            "allTransactions": {"results": _listing_rows(), "totalCount": 2}
+        }
+        self._assert_business(
+            json.loads(await get_transactions_needing_review(needs_review=True))["data"]
+        )

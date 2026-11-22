@@ -7,9 +7,16 @@ from gql import gql
 
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
-from monarch_mcp_server.helpers import json_error, json_success
+from monarch_mcp_server.helpers import json_error, json_success, require_nonblank
 
 logger = logging.getLogger(__name__)
+
+# Spellings Monarch refuses for a recurrence frequency, mapped to the value it
+# expects. The mutation rejects an unknown frequency with an opaque "Something
+# went wrong while processing" error that never names the field, so a natural
+# spelling like "annually" fails with nothing to go on. Verified against the
+# live API: "annually" is refused, "yearly" is accepted.
+FREQUENCY_ALIASES = {"annually": "yearly"}
 
 # ---------------------------------------------------------------------------
 # GraphQL constants
@@ -189,9 +196,12 @@ async def update_merchant(
         merchant_id: The Monarch merchant ID.
         name: New merchant display name.
         is_recurring: Whether this merchant has a recurring stream.
-        frequency: Recurrence frequency. Known values: "weekly", "biweekly",
-            "twice_a_month", "monthly", "quarterly", "semiannually",
-            "annually".
+        frequency: Recurrence frequency. Values verified against the live
+            API: "weekly", "biweekly", "monthly", "quarterly", "yearly".
+            "annually" is accepted as an alias for "yearly", since Monarch
+            refuses it. Any other value is passed through unchanged and is
+            unverified; Monarch rejects an unknown one with an opaque
+            server error.
         base_date: Anchor date for recurrence in YYYY-MM-DD format.
         amount: Expected recurring amount (negative for expenses, positive
             for income).
@@ -212,6 +222,10 @@ async def update_merchant(
             )
     """
     try:
+        if frequency is not None:
+            frequency = frequency.strip().lower()
+            frequency = FREQUENCY_ALIASES.get(frequency, frequency)
+
         recurrence_fields: Dict[str, Any] = {
             k: v
             for k, v in {
@@ -236,6 +250,7 @@ async def update_merchant(
         merchant_input: Dict[str, Any] = {"merchantId": merchant_id}
 
         if name is not None:
+            require_nonblank(name, "name")
             merchant_input["name"] = name
 
         if recurrence_fields:
@@ -333,3 +348,58 @@ async def review_recurring_stream(
         )
     except Exception as e:
         return json_error("review_recurring_stream", e)
+
+
+@mcp.tool()
+async def merge_merchants(source_merchant_id: str, target_merchant_id: str) -> str:
+    """
+    Merge one merchant into another, deleting the source. Cannot be undone.
+
+    This is the "Merge & delete" action in Monarch's Edit merchant dialog: the
+    source merchant's transactions move to the target and the source record is
+    removed. Check both merchants with get_merchant first.
+
+    Args:
+        source_merchant_id: The merchant to merge away. It is deleted.
+        target_merchant_id: The merchant to keep.
+
+    Returns:
+        Success flag and both merchant IDs.
+
+    Example:
+        Merge a duplicate spelling into the canonical merchant:
+            merge_merchants(
+                source_merchant_id="160319777541808781",
+                target_merchant_id="160319777541808782",
+            )
+    """
+    try:
+        source_merchant_id = source_merchant_id.strip()
+        target_merchant_id = target_merchant_id.strip()
+
+        # A blank target must not reach the client: without a target, Monarch
+        # deletes the merchant rather than merging it.
+        require_nonblank(source_merchant_id, "source_merchant_id")
+        require_nonblank(target_merchant_id, "target_merchant_id")
+        if source_merchant_id == target_merchant_id:
+            raise ValueError("source_merchant_id and target_merchant_id must differ")
+
+        client = await get_monarch_client()
+        result = await client.delete_merchant(
+            source_merchant_id, move_to_merchant_id=target_merchant_id
+        )
+
+        # The mutation reports a success flag, so read it rather than inferring
+        # the merge took from the absence of an exception.
+        if not (result.get("deleteMerchant") or {}).get("success"):
+            return json_success({"success": False, "result": result})
+
+        return json_success(
+            {
+                "success": True,
+                "source_merchant_id": source_merchant_id,
+                "target_merchant_id": target_merchant_id,
+            }
+        )
+    except Exception as e:
+        return json_error("merge_merchants", e)

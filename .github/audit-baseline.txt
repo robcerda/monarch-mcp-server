@@ -1,0 +1,77 @@
+# Known advisories against the locked dependency set, accepted for now.
+# The audit fails on any advisory NOT listed here, so a newly published
+# one is a red build while this standing backlog stays quiet.
+#
+# Every entry is a deliberate, dated acknowledgement. Remove entries as
+# dependencies are upgraded. Do not add one without saying why.
+#
+# Seeded 2026-09-06 from the first CI run of this workflow.
+#
+# Do not assume an mcp bump clears this. It does not. Measured against the
+# committed lock: constraining to mcp[cli]>=1.28.1,<2 resolves to 1.29.1 and
+# clears exactly the three mcp entries. Every starlette and python-multipart
+# entry survives, because mcp depends on them with lower bounds only and uv
+# resolves minimally, so a transitive pin that already satisfies the new
+# constraint does not move. Clearing those needs an explicit
+# uv lock --upgrade-package starlette python-multipart, or a full upgrade.
+
+# black 25.1.0
+PYSEC-2026-2120  # fixed in 26.3.0
+PYSEC-2026-2121  # fixed in 26.3.1
+
+# click 8.2.1
+PYSEC-2026-2132  # fixed in 8.3.3
+
+# cryptography 45.0.7
+GHSA-537c-gmf6-5ccf  # fixed in 48.0.1
+PYSEC-2026-2141  # fixed in 46.0.5
+PYSEC-2026-35  # fixed in 46.0.6
+PYSEC-2026-3552  # fixed in 50.0.0
+PYSEC-2026-3553  # fixed in 49.0.0
+PYSEC-2026-3554  # fixed in 49.0.0
+PYSEC-2026-36  # fixed in 46.0.7
+
+# filelock 3.19.1
+PYSEC-2026-1374  # fixed in 3.20.3
+PYSEC-2026-1375  # fixed in 3.20.1
+
+# idna 3.10
+PYSEC-2026-215  # fixed in 3.15
+
+# jaraco-context 6.0.1
+CVE-2026-23949  # fixed in 6.1.0
+PYSEC-2026-1469  # fixed in 6.1.0
+
+# mcp 1.13.1
+PYSEC-2026-1617  # fixed in 1.23.0
+PYSEC-2026-3482  # fixed in 1.27.2
+PYSEC-2026-3483  # fixed in 1.28.1
+
+# pygments 2.19.2
+PYSEC-2026-2987  # fixed in 2.20.0
+
+# pytest 8.4.2
+PYSEC-2026-1845  # fixed in 9.0.3
+
+# python-dotenv 1.1.1
+PYSEC-2026-2270  # fixed in 1.2.2
+
+# python-multipart 0.0.20
+PYSEC-2026-1852  # fixed in 0.0.22
+PYSEC-2026-3036  # fixed in 0.0.30
+PYSEC-2026-3037  # fixed in 0.0.30
+PYSEC-2026-3038  # fixed in 0.0.26
+PYSEC-2026-3039  # fixed in 0.0.27
+PYSEC-2026-3040  # fixed in 0.0.31
+PYSEC-2026-3041  # fixed in 0.0.30
+
+# starlette 0.47.3
+PYSEC-2026-161  # fixed in 1.0.1
+PYSEC-2026-1942  # fixed in 0.49.1
+PYSEC-2026-2280  # fixed in 1.1.0
+PYSEC-2026-2281  # fixed in 1.1.0
+PYSEC-2026-248  # fixed in 1.3.0
+PYSEC-2026-249  # fixed in 1.3.1
+
+# virtualenv 20.34.0
+PYSEC-2026-2009  # fixed in 20.36.1

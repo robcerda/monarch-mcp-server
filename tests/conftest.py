@@ -14,6 +14,44 @@ sys.modules.setdefault("monarchmoney.monarchmoney", MagicMock())
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolate_credential_storage(monkeypatch, tmp_path):
+    """Keep the whole suite away from real credential storage.
+
+    Two things went wrong without this. Tests that exercise session loading
+    read whatever the developer actually had stored, so a test asserting "no
+    session returns None" failed on any authenticated machine and passed
+    everywhere else. And constructing a SecureMonarchSession runs the keyring
+    probe, which writes to the real login keychain on macOS and can raise an
+    OS credential prompt during an ordinary test run.
+
+    Both the file fallback and the keyring backend are redirected here. Tests
+    that install their own keyring fake still win, because their monkeypatch
+    runs after this one.
+    """
+    import types
+
+    from monarch_mcp_server import secure_session as ss_module
+
+    monkeypatch.setattr(ss_module, "_TOKEN_DIR", tmp_path / "credential-store")
+    monkeypatch.setattr(
+        ss_module, "_TOKEN_FILE", tmp_path / "credential-store" / "token"
+    )
+
+    store: dict = {}
+    fake = types.ModuleType("keyring")
+    fake.set_password = lambda service, username, value: store.__setitem__(
+        (service, username), value
+    )
+    fake.get_password = lambda service, username: store.get((service, username))
+    fake.delete_password = lambda service, username: store.pop(
+        (service, username), None
+    )
+    monkeypatch.setitem(sys.modules, "keyring", fake)
+
+    yield
+
+
 @pytest.fixture
 def mock_monarch_client():
     """Create a mock MonarchMoney client with default responses."""
@@ -137,12 +175,124 @@ def mock_monarch_client():
         ],
     }
 
+    # Upstream get_cashflow returns the raw Common_GetCashFlowEntityAggregates
+    # payload: nested groupBy/summary wrappers, __typename on every node, and a
+    # merchant list that carries full logo URLs.
     client.get_cashflow.return_value = {
-        "cashflow": {
-            "income": 5000.00,
-            "expenses": -3200.00,
-            "savings": 1800.00,
-        }
+        "byCategory": [
+            {
+                "groupBy": {
+                    "category": {
+                        "id": "cat-1",
+                        "name": "Groceries",
+                        "icon": "🛒",
+                        "group": {
+                            "id": "grp-1",
+                            "type": "expense",
+                            "__typename": "CategoryGroup",
+                        },
+                        "__typename": "Category",
+                    },
+                    "__typename": "AggregateGroupBy",
+                },
+                "summary": {"sum": -3200.00, "__typename": "TransactionsSummary"},
+                "__typename": "AggregateData",
+            },
+            {
+                "groupBy": {
+                    "category": {
+                        "id": "cat-3",
+                        "name": "Paychecks",
+                        "icon": "💵",
+                        "group": {
+                            "id": "grp-2",
+                            "type": "income",
+                            "__typename": "CategoryGroup",
+                        },
+                        "__typename": "Category",
+                    },
+                    "__typename": "AggregateGroupBy",
+                },
+                "summary": {"sum": 5000.00, "__typename": "TransactionsSummary"},
+                "__typename": "AggregateData",
+            },
+        ],
+        "byCategoryGroup": [
+            {
+                "groupBy": {
+                    "categoryGroup": {
+                        "id": "grp-2",
+                        "name": "Income",
+                        "type": "income",
+                        "__typename": "CategoryGroup",
+                    },
+                    "__typename": "AggregateGroupBy",
+                },
+                "summary": {"sum": 5000.00, "__typename": "TransactionsSummary"},
+                "__typename": "AggregateData",
+            },
+            {
+                "groupBy": {
+                    "categoryGroup": {
+                        "id": "grp-1",
+                        "name": "Food",
+                        "type": "expense",
+                        "__typename": "CategoryGroup",
+                    },
+                    "__typename": "AggregateGroupBy",
+                },
+                "summary": {"sum": -3200.00, "__typename": "TransactionsSummary"},
+                "__typename": "AggregateData",
+            },
+        ],
+        "byMerchant": [
+            {
+                "groupBy": {
+                    "merchant": {
+                        "id": "mer-1",
+                        "name": "Whole Foods",
+                        "logoUrl": "https://res.cloudinary.com/monarch-money/x/wholefoods",
+                        "__typename": "Merchant",
+                    },
+                    "__typename": "AggregateGroupBy",
+                },
+                "summary": {
+                    "sumIncome": 0.00,
+                    "sumExpense": -3200.00,
+                    "__typename": "TransactionsSummary",
+                },
+                "__typename": "AggregateData",
+            },
+            {
+                "groupBy": {
+                    "merchant": {
+                        "id": "mer-2",
+                        "name": "Employer",
+                        "logoUrl": "https://res.cloudinary.com/monarch-money/x/employer",
+                        "__typename": "Merchant",
+                    },
+                    "__typename": "AggregateGroupBy",
+                },
+                "summary": {
+                    "sumIncome": 5000.00,
+                    "sumExpense": 0.00,
+                    "__typename": "TransactionsSummary",
+                },
+                "__typename": "AggregateData",
+            },
+        ],
+        "summary": [
+            {
+                "summary": {
+                    "sumIncome": 5000.00,
+                    "sumExpense": -3200.00,
+                    "savings": 1800.00,
+                    "savingsRate": 0.36,
+                    "__typename": "TransactionsSummary",
+                },
+                "__typename": "AggregateData",
+            }
+        ],
     }
 
     client.get_account_holdings.return_value = {

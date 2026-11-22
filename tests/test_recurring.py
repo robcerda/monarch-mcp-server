@@ -119,7 +119,7 @@ async def test_missing_statement_and_unmapped_account_remain_null(client, items)
 
 
 async def test_opt_out_and_pagination_metadata(client, items):
-    client.gql_call.return_value = {"recurringTransactionItems": items[:1]}
+    client.gql_call.return_value = _page_of(items[0], 5)
     result = json.loads(
         await transactions.get_recurring_transactions(
             "2026-02-01",
@@ -131,15 +131,14 @@ async def test_opt_out_and_pagination_metadata(client, items):
         )
     )
     assert result["count"] == 1
-    assert result["total_count"] is None
+    assert result["total_count"] == 5
     assert result["truncated"] is True
+    assert result["data"][0]["amount"] == 2.0
     assert result["data"][0]["stream"]["merchant"] == "Example Subscription"
     assert client.gql_call.call_args.kwargs["variables"] == {
         "startDate": "2026-02-01",
         "endDate": "2026-02-28",
         "includeLiabilities": False,
-        "limit": 1,
-        "offset": 2,
     }
 
 
@@ -156,7 +155,7 @@ async def test_short_page_is_not_truncated(client, items, count):
     )
     assert result["count"] == count
     assert result["truncated"] is False
-    assert result["total_count"] is None
+    assert result["total_count"] == count
 
 
 async def test_default_dates_are_current_calendar_month(client):
@@ -218,68 +217,54 @@ async def test_null_optional_item_fields(client):
 
 
 def _page_of(item, size):
-    return {"recurringTransactionItems": [copy.deepcopy(item) for _ in range(size)]}
+    """Rows numbered by amount, so slices can be checked by position."""
+    page = [copy.deepcopy(item) for _ in range(size)]
+    for n, row in enumerate(page):
+        row["amount"] = float(n)
+    return {"recurringTransactionItems": page}
 
 
-async def test_omitted_limit_reads_every_page(client, items):
-    """The default list has no truncated flag, so it must be the whole range."""
-    size = transactions.RECURRING_PAGE_SIZE
-    client.gql_call.side_effect = [
-        _page_of(items[0], size),
-        _page_of(items[0], size),
-        _page_of(items[0], 3),
-    ]
+async def test_omitted_limit_returns_whole_range_from_offset(client, items):
+    """Monarch ignores limit and offset and sends the whole range in one go."""
+    client.gql_call.return_value = _page_of(items[0], 289)
     rows = json.loads(
-        await transactions.get_recurring_transactions("2026-02-01", "2026-02-28")
-    )
-    assert len(rows) == 2 * size + 3
-    offsets = [c.kwargs["variables"]["offset"] for c in client.gql_call.call_args_list]
-    assert offsets == [0, size, 2 * size]
-    limits = {c.kwargs["variables"]["limit"] for c in client.gql_call.call_args_list}
-    assert limits == {size}
-
-
-async def test_omitted_limit_starts_from_offset(client, items):
-    client.gql_call.return_value = _page_of(items[0], 1)
-    await transactions.get_recurring_transactions(
-        "2026-02-01", "2026-02-28", offset=40
-    )
-    assert client.gql_call.call_args.kwargs["variables"]["offset"] == 40
-
-
-async def test_exactly_full_final_page_needs_one_empty_read(client, items):
-    size = transactions.RECURRING_PAGE_SIZE
-    client.gql_call.side_effect = [_page_of(items[0], size), _page_of(items[0], 0)]
-    result = json.loads(
         await transactions.get_recurring_transactions(
-            "2026-02-01", "2026-02-28", include_metadata=True
+            "2026-01-01", "2026-12-31", offset=40
         )
     )
-    assert result["count"] == size
-    assert result["truncated"] is False
-    assert result["args"]["limit"] is None
-    assert client.gql_call.call_count == 2
-
-
-async def test_explicit_limit_reads_a_single_page(client, items):
-    client.gql_call.return_value = _page_of(items[0], 5)
-    result = json.loads(
-        await transactions.get_recurring_transactions(
-            "2026-02-01", "2026-02-28", limit=5, include_metadata=True
-        )
-    )
+    assert [row["amount"] for row in rows] == [float(n) for n in range(40, 289)]
     assert client.gql_call.call_count == 1
-    assert result["truncated"] is True
 
 
-async def test_page_cap_is_reported_not_hidden(client, items):
-    """A server that ignores offset must not loop forever or look complete."""
-    client.gql_call.return_value = _page_of(items[0], transactions.RECURRING_PAGE_SIZE)
-    with patch.object(transactions, "RECURRING_MAX_PAGES", 3):
+async def test_manual_paging_advances_and_ends(client, items):
+    client.gql_call.return_value = _page_of(items[0], 25)
+    seen, counts = [], []
+    offset = 0
+    while True:
         result = json.loads(
             await transactions.get_recurring_transactions(
-                "2026-02-01", "2026-02-28", include_metadata=True
+                "2026-02-01",
+                "2026-02-28",
+                limit=10,
+                offset=offset,
+                include_metadata=True,
             )
         )
-    assert client.gql_call.call_count == 3
-    assert result["truncated"] is True
+        seen += [row["amount"] for row in result["data"]]
+        counts.append(result["count"])
+        offset += result["count"]
+        if not result["truncated"]:
+            break
+    assert counts == [10, 10, 5]
+    assert seen == [float(n) for n in range(25)]
+
+
+async def test_limit_matching_the_range_is_not_truncated(client, items):
+    client.gql_call.return_value = _page_of(items[0], 10)
+    result = json.loads(
+        await transactions.get_recurring_transactions(
+            "2026-02-01", "2026-02-28", limit=10, include_metadata=True
+        )
+    )
+    assert result["count"] == 10
+    assert result["truncated"] is False

@@ -801,6 +801,11 @@ async def update_transaction(
             update_data["hide_from_reports"] = hide_from_reports
         if needs_review is not None:
             update_data["needs_review"] = needs_review
+            if not needs_review:
+                # needsReview=False alone clears the flag but leaves Monarch's
+                # reviewedByUser / reviewedAt empty; `reviewed` records them,
+                # as a review in the web app does.
+                update_data["reviewed"] = True
         if notes is not None:
             update_data["notes"] = notes
         if owner_user_id is not None:
@@ -883,6 +888,8 @@ async def mark_transaction_reviewed(transaction_id: str) -> str:
     Mark a transaction as reviewed (clears the needs_review flag).
 
     Use this after reviewing a transaction that doesn't need category changes.
+    Monarch records the signed-in user as the reviewer, as it does for a
+    review in the web app.
 
     Args:
         transaction_id: The ID of the transaction to mark as reviewed
@@ -892,9 +899,12 @@ async def mark_transaction_reviewed(transaction_id: str) -> str:
     """
     try:
         client = await get_monarch_client()
+        # needs_review=False alone clears the flag but leaves reviewedByUser
+        # and reviewedAt empty; reviewed=True records them.
         result = await client.update_transaction(
             transaction_id=transaction_id,
             needs_review=False,
+            reviewed=True,
         )
         errors = payload_errors(result, "updateTransaction")
         if errors:
@@ -1088,7 +1098,8 @@ async def bulk_categorize_transactions(
     Args:
         transaction_ids: List of transaction IDs to categorize
         category_id: The category ID to apply to all transactions
-        mark_reviewed: Whether to also mark transactions as reviewed (default: True)
+        mark_reviewed: Whether to also mark transactions as reviewed, recording
+            the signed-in user as the reviewer (default: True)
         dry_run: If True, return what would be updated without making changes
 
     Returns:
@@ -1120,7 +1131,10 @@ async def bulk_categorize_transactions(
                 "category_id": category_id,
             }
             if mark_reviewed:
+                # Both, as in mark_transaction_reviewed: the flag alone leaves
+                # reviewedByUser / reviewedAt empty.
                 update_params["needs_review"] = False
+                update_params["reviewed"] = True
             # Returned, not discarded: Monarch refuses a write by putting
             # errors in the payload of an HTTP 200, so the absence of an
             # exception says nothing about whether anything was written.

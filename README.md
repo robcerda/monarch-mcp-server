@@ -536,6 +536,7 @@ live tool registry and the functions' signatures, so it does not drift.
 | `debug_session_loading` | Diagnose session loading problems | None |
 | `delete_transaction` | Delete a transaction from Monarch Money | `transaction_id` |
 | `delete_transaction_rule` | Delete a transaction rule | `rule_id` |
+| `find_merchants_missing_logos` | List merchants with no logo, ranked by transaction count | `start_date`?, `end_date`?, `include_with_logos`? |
 | `get_account_balance_history` | Get historical balance data for a specific account | `account_id` |
 | `get_account_holdings` | Get investment holdings for a specific account | `account_id` |
 | `get_account_sync_health` | Report the health of each linked institution connection | `stale_after_days`? |
@@ -580,6 +581,7 @@ live tool registry and the functions' signatures, so it does not drift.
 | `set_flexible_budget` | Set the all-up Flexible bucket budget (Monarch's "fixed_and_flex" system) | `amount`, `start_date`?, `apply_to_future`? |
 | `set_business_entity` | Set (or clear) the business entity on one transaction | `transaction_id`, `business_entity_id` |
 | `set_goal_contribution` | Set the budgeted monthly contribution to a goal from one funding account | `goal_id`, `account_id`, `amount` |
+| `set_merchant_logo` | Set a custom merchant logo from a URL, local file or domain (dry run default) | `merchant_id`, `image_url`?, `image_path`?, `domain`?, `circle_safe`?, `pad_color`?, `dry_run`? |
 | `set_transaction_tags` | Set tags on a transaction | `transaction_id`, `tag_ids` |
 | `setup_authentication` | Get setup instructions | None |
 | `split_transaction` | Split a transaction into multiple parts with different categories/merchants | `transaction_id`, `splits` |
@@ -830,7 +832,7 @@ These tools mutate your Monarch data. The list is every registered tool that wri
 
 **Goals**: `update_savings_goal`, `set_goal_contribution`
 
-**Merchants**: `update_merchant`, `merge_merchants`, `review_recurring_stream`
+**Merchants**: `update_merchant`, `merge_merchants`, `review_recurring_stream`, `set_merchant_logo`
 
 **Session**: `monarch_login`, `monarch_login_with_token`, `monarch_logout`
 

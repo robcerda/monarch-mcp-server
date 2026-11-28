@@ -111,6 +111,10 @@ from monarch_mcp_server.tools.merchants import (  # noqa: F401
     merge_merchants,
     review_recurring_stream,
 )
+from monarch_mcp_server.tools.merchant_logos import (  # noqa: F401
+    find_merchants_missing_logos,
+    set_merchant_logo,
+)
 from monarch_mcp_server.tools.business import (  # noqa: F401
     get_business_entities,
     set_business_entity,

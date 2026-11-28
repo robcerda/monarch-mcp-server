@@ -217,10 +217,46 @@ class TestFindMissing:
             ]
         }
         with patch.object(ml, "get_monarch_client", AsyncMock(return_value=client)):
-            out = json.loads(await find_merchants_missing_logos(start_date="2026-01-01"))
+            out = json.loads(
+                await find_merchants_missing_logos(
+                    start_date="2026-01-01", spending_only=False
+                )
+            )
         assert [m["merchant_id"] for m in out["merchants"]] == ["c", "a"]
         assert out["merchants_with_logo"] == 1
         assert out["merchants_without_logo"] == 2
         assert client.gql_call.await_args.kwargs["variables"] == {
             "filters": {"startDate": "2026-01-01"}
         }
+        client.get_transaction_categories.assert_not_called()
+
+    async def test_spending_only_filters_to_expense_categories(self):
+        client = AsyncMock()
+        client.get_transaction_categories.return_value = {
+            "categories": [
+                {"id": "groceries", "group": {"type": "expense"}},
+                {"id": "transfer", "group": {"type": "transfer"}},
+                {"id": "paycheck", "group": {"type": "income"}},
+                {"id": "dining", "group": {"type": "expense"}},
+                {"id": "orphan", "group": None},
+            ]
+        }
+        client.gql_call.return_value = {"byMerchant": []}
+        with patch.object(ml, "get_monarch_client", AsyncMock(return_value=client)):
+            out = json.loads(await find_merchants_missing_logos())
+        assert out["spending_only"] is True
+        assert client.gql_call.await_args.kwargs["variables"] == {
+            "filters": {"categories": ["groceries", "dining"]}
+        }
+
+    async def test_spending_only_with_no_expense_categories_returns_nothing(self):
+        # An empty categories filter means "no filter" to Monarch, so it must
+        # never be sent: that would silently count transfers and income again.
+        client = AsyncMock()
+        client.get_transaction_categories.return_value = {
+            "categories": [{"id": "transfer", "group": {"type": "transfer"}}]
+        }
+        with patch.object(ml, "get_monarch_client", AsyncMock(return_value=client)):
+            out = json.loads(await find_merchants_missing_logos())
+        assert out["count"] == 0 and out["merchants"] == []
+        client.gql_call.assert_not_called()

@@ -427,6 +427,7 @@ async def find_merchants_missing_logos(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     include_with_logos: bool = False,
+    spending_only: bool = True,
 ) -> str:
     """
     List merchants that have no logo, ranked by how many transactions use them.
@@ -436,10 +437,17 @@ async def find_merchants_missing_logos(
     you renamed or created yourself are the usual ones without a logo, since
     they lose Monarch's automatic brand match.
 
+    By default only transactions in expense categories are counted, so
+    transfers, card payments, deposits, interest, paychecks and brokerage
+    journal entries (which are not vendors and gain nothing from a logo) drop
+    out. Counts and totals then cover spending only.
+
     Args:
         start_date: Optional window start, YYYY-MM-DD. Omit for all time.
         end_date: Optional window end, YYYY-MM-DD.
         include_with_logos: Also return merchants that already have a logo.
+        spending_only: Count only transactions in expense-type categories
+            (default True). Set False to include income and transfer merchants.
 
     Returns:
         Merchants with id, name, logo_url, transaction_count and totals, plus
@@ -456,6 +464,28 @@ async def find_merchants_missing_logos(
             filters["endDate"] = end_date
 
         client = await get_monarch_client()
+        if spending_only:
+            cats = await client.get_transaction_categories()
+            expense_ids = [
+                c["id"]
+                for c in (cats or {}).get("categories") or []
+                if c.get("id") and ((c.get("group") or {}).get("type") == "expense")
+            ]
+            if not expense_ids:
+                # An empty categories filter means "all categories" to Monarch,
+                # which would bring transfers and income straight back.
+                return json_success(
+                    {
+                        "spending_only": True,
+                        "merchants_with_logo": 0,
+                        "merchants_without_logo": 0,
+                        "count": 0,
+                        "merchants": [],
+                        "message": "No expense categories found",
+                    }
+                )
+            filters["categories"] = expense_ids
+
         result = await client.gql_call(
             operation="Common_GetMerchantLogoAggregates",
             graphql_query=MERCHANT_AGGREGATES_QUERY,
@@ -487,6 +517,7 @@ async def find_merchants_missing_logos(
         rows.sort(key=lambda r: -(r.get("transaction_count") or 0))
         return json_success(
             {
+                "spending_only": spending_only,
                 "merchants_with_logo": with_logo,
                 "merchants_without_logo": without_logo,
                 "count": len(rows),

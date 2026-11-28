@@ -1,6 +1,8 @@
 """Tests for the merchant logo tools."""
 
 import json
+import struct
+import zlib
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -310,3 +312,164 @@ class TestFindMissing:
             out = json.loads(await find_merchants_missing_logos())
         assert out["count"] == 0 and out["merchants"] == []
         client.gql_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ICO conversion
+# ---------------------------------------------------------------------------
+
+
+def _bmp32_entry(w, h, pixel_fn, alpha=True, mask_fn=None):
+    """A 32bpp ICO bitmap: BITMAPINFOHEADER, bottom-up BGRA rows, AND mask."""
+    header = struct.pack("<IiiHHIIiiII", 40, w, h * 2, 1, 32, 0, 0, 0, 0, 0, 0)
+    rows = []
+    for y in reversed(range(h)):
+        row = b""
+        for x in range(w):
+            r, g, b, a = pixel_fn(x, y)
+            row += bytes((b, g, r, a if alpha else 0))
+        rows.append(row)
+    stride = ((w + 31) // 32) * 4
+    mask_rows = []
+    for y in reversed(range(h)):
+        bits = bytearray(stride)
+        for x in range(w):
+            if mask_fn and mask_fn(x, y):
+                bits[x // 8] |= 0x80 >> (x % 8)
+        mask_rows.append(bytes(bits))
+    return header + b"".join(rows) + b"".join(mask_rows)
+
+
+def _ico(entries):
+    """entries: list of (w, h, bpp, payload)."""
+    out = struct.pack("<HHH", 0, 1, len(entries))
+    offset = 6 + 16 * len(entries)
+    blobs = b""
+    for w, h, bpp, payload in entries:
+        out += struct.pack("<BBBBHHII", w % 256, h % 256, 0, 0, 1, bpp,
+                           len(payload), offset + len(blobs))
+        blobs += payload
+    return out + blobs
+
+
+def _decode_png(data):
+    """Minimal decoder for the filter-0 RGBA PNGs ico_to_png writes."""
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+    pos, idat = 8, b""
+    w = h = None
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos:pos + 4])
+        kind, body = data[pos + 4:pos + 8], data[pos + 8:pos + 8 + length]
+        assert zlib.crc32(kind + body) == struct.unpack(
+            ">I", data[pos + 8 + length:pos + 12 + length])[0]
+        if kind == b"IHDR":
+            w, h, depth, ctype = struct.unpack(">IIBB", body[:10])
+            assert (depth, ctype) == (8, 6)
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + length
+    raw = zlib.decompress(idat)
+    stride = 1 + w * 4
+    px = {}
+    for y in range(h):
+        row = raw[y * stride:(y + 1) * stride]
+        assert row[0] == 0
+        for x in range(w):
+            px[(x, y)] = tuple(row[1 + x * 4:5 + x * 4])
+    return w, h, px
+
+
+def _gradient(x, y):
+    return (x * 10 % 256, y * 10 % 256, 200, 255)
+
+
+class TestIcoToPng:
+    def test_picks_largest_bmp_entry_and_keeps_orientation(self):
+        ico = _ico([
+            (2, 2, 32, _bmp32_entry(2, 2, lambda x, y: (1, 1, 1, 255))),
+            (6, 4, 32, _bmp32_entry(6, 4, _gradient)),
+            (3, 3, 32, _bmp32_entry(3, 3, lambda x, y: (2, 2, 2, 255))),
+        ])
+        w, h, px = _decode_png(ml.ico_to_png(ico))
+        assert (w, h) == (6, 4)
+        # Top-left and bottom-right prove rows were flipped and BGRA swapped.
+        assert px[(0, 0)] == (0, 0, 200, 255)
+        assert px[(5, 3)] == (50, 30, 200, 255)
+
+    def test_embedded_png_entry_is_returned_as_is(self):
+        png = ml._encode_png(8, 8, [bytes((9, 9, 9, 255)) * 8] * 8)
+        ico = _ico([
+            (4, 4, 32, _bmp32_entry(4, 4, _gradient)),
+            (8, 8, 32, png),
+        ])
+        assert ml.ico_to_png(ico) == png
+
+    def test_256px_entry_size_byte_zero(self):
+        ico = _ico([
+            (16, 16, 32, _bmp32_entry(16, 16, _gradient)),
+            (256, 256, 32, _bmp32_entry(256, 256, lambda x, y: (7, 7, 7, 255))),
+        ])
+        w, h, px = _decode_png(ml.ico_to_png(ico))
+        assert (w, h) == (256, 256) and px[(0, 0)] == (7, 7, 7, 255)
+
+    def test_zero_alpha_bitmap_uses_and_mask(self):
+        # Old-style 32bpp icons leave alpha at 0 and rely on the AND mask.
+        ico = _ico([(4, 1, 32, _bmp32_entry(
+            4, 1, lambda x, y: (100, 100, 100, 0), alpha=False,
+            mask_fn=lambda x, y: x == 3))])
+        _, _, px = _decode_png(ml.ico_to_png(ico))
+        assert px[(0, 0)] == (100, 100, 100, 255)
+        assert px[(3, 0)][3] == 0
+
+    def test_palette_icon_without_sips_is_refused(self, monkeypatch):
+        header = struct.pack("<IiiHHIIiiII", 40, 4, 8, 1, 8, 0, 0, 0, 0, 0, 0)
+        ico = _ico([(4, 4, 8, header + b"\0" * 64)])
+        monkeypatch.setattr(ml, "_sips", lambda: None)
+        with pytest.raises(ValueError, match="8-bit"):
+            ml.ico_to_png(ico)
+
+    @pytest.mark.parametrize(
+        "data",
+        [b"\0\0\1\0", b"\0\0\1\0\1\0" + b"\0" * 16,
+         _ico([(4, 4, 32, b"short")])],
+    )
+    def test_malformed_ico_is_refused(self, data):
+        with pytest.raises(ValueError):
+            ml.ico_to_png(data)
+
+
+class TestSetMerchantLogoIco:
+    async def test_ico_is_uploaded_as_png_without_circle_safe(self, tmp_path):
+        img = tmp_path / "favicon.ico"
+        img.write_bytes(_ico([(48, 48, 32, _bmp32_entry(48, 48, _gradient))]))
+        info = {"path": "/v1_1/monarch-money/image/upload/", "requestParams": {}}
+        client = AsyncMock()
+        client.gql_call.side_effect = [
+            MERCHANT,
+            {"getCloudinaryUploadInfo": {"info": info, "errors": None}},
+            {"setMerchantLogo": {"merchant": {"id": "m1", "logoUrl": "https://l"},
+                                 "errors": None}},
+        ]
+        upload = AsyncMock(return_value="pid")
+        with patch.object(ml, "get_monarch_client", AsyncMock(return_value=client)), \
+             patch.object(ml, "upload_to_cloudinary", upload):
+            out = json.loads(await set_merchant_logo(
+                merchant_id="m1", image_path=str(img), dry_run=False))
+        assert out["success"] is True
+        assert out["mime_type"] == "image/png"
+        assert out["source_dimensions"] == "48x48"
+        assert "48x48" in out["warning"]
+        _, data, mime = upload.await_args.args
+        assert mime == "image/png" and data.startswith(b"\x89PNG")
+
+    async def test_ico_dry_run_preview_is_png(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ml, "PREVIEW_DIR", tmp_path / "previews")
+        img = tmp_path / "favicon.ico"
+        img.write_bytes(_ico([(32, 32, 32, _bmp32_entry(32, 32, _gradient))]))
+        client = AsyncMock()
+        client.gql_call.return_value = MERCHANT
+        with patch.object(ml, "get_monarch_client", AsyncMock(return_value=client)):
+            out = json.loads(await set_merchant_logo(
+                merchant_id="m1", image_path=str(img)))
+        assert out["preview_path"].endswith("m1.png")
+        assert out["mime_type"] == "image/png"

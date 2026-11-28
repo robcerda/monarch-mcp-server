@@ -23,6 +23,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
@@ -251,6 +252,111 @@ def pad_for_circle(data: bytes, mime: str, pad_color: str) -> bytes:
             str(out),
         )
         return out.read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# ICO to PNG
+# ---------------------------------------------------------------------------
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_MAX_ICO_SIDE = 1024
+
+
+def _png_chunk(kind: bytes, body: bytes) -> bytes:
+    crc = zlib.crc32(kind + body) & 0xFFFFFFFF
+    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", crc)
+
+
+def _encode_png(width: int, height: int, rows: List[bytes]) -> bytes:
+    """Encode top-down 8-bit RGBA rows as a PNG (filter 0 on every row)."""
+    raw = b"".join(b"\x00" + row for row in rows)
+    return (
+        _PNG_SIGNATURE
+        + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+        + _png_chunk(b"IDAT", zlib.compress(raw, 9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _bmp32_to_png(entry: bytes) -> bytes:
+    """Decode a 32bpp ICO bitmap (BGRA, bottom-up, AND mask) to PNG."""
+    header_size, width, double_height = struct.unpack("<Iii", entry[:12])
+    height = abs(double_height) // 2
+    if not (0 < width <= _MAX_ICO_SIDE and 0 < height <= _MAX_ICO_SIDE):
+        raise ValueError(f"ICO image has implausible size {width}x{height}")
+    row_len = width * 4
+    pixels = entry[header_size : header_size + row_len * height]
+    if len(pixels) < row_len * height:
+        raise ValueError("ICO image data is truncated")
+    mask_stride = ((width + 31) // 32) * 4
+    mask = entry[header_size + row_len * height :]
+    if len(mask) < mask_stride * height:
+        mask = b""
+    # Icons from before alpha channels leave alpha at 0 everywhere and mark
+    # transparency in the 1-bit AND mask instead.
+    has_alpha = any(pixels[3::4])
+
+    rows = []
+    for y in range(height):
+        src = height - 1 - y  # bitmaps are stored bottom-up
+        row = bytearray(pixels[src * row_len : (src + 1) * row_len])
+        row[0::4], row[2::4] = row[2::4], row[0::4]  # BGRA -> RGBA
+        if not has_alpha:
+            mask_row = mask[src * mask_stride : (src + 1) * mask_stride]
+            for x in range(width):
+                hidden = mask_row and (mask_row[x // 8] >> (7 - x % 8)) & 1
+                row[x * 4 + 3] = 0 if hidden else 255
+        rows.append(bytes(row))
+    return _encode_png(width, height, rows)
+
+
+def _sips_to_png(data: bytes, ext: str) -> bytes:
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / f"src{ext}"
+        out = Path(tmp) / "out.png"
+        src.write_bytes(data)
+        _run_sips("-s", "format", "png", str(src), "--out", str(out))
+        return out.read_bytes()
+
+
+def ico_to_png(data: bytes) -> bytes:
+    """Convert an ICO to PNG, keeping the largest image in the file.
+
+    Favicons are often the only image a domain lookup finds, and they usually
+    hold several sizes. An entry that is already a PNG is returned unchanged,
+    and 32bpp bitmaps (the common case) are decoded here, so neither needs
+    sips. Older palette icons fall back to sips where it exists.
+    """
+    if len(data) < 6 or data[:4] != b"\x00\x00\x01\x00":
+        raise ValueError("Not an ICO file")
+    (count,) = struct.unpack("<H", data[4:6])
+    entries = []
+    for i in range(count):
+        entry = data[6 + 16 * i : 22 + 16 * i]
+        if len(entry) < 16:
+            break
+        width, height = entry[0] or 256, entry[1] or 256  # 0 means 256
+        (bpp,) = struct.unpack("<H", entry[6:8])
+        size, offset = struct.unpack("<II", entry[8:16])
+        if size >= 8 and offset + size <= len(data):
+            entries.append((width * height, bpp, data[offset : offset + size]))
+    if not entries:
+        raise ValueError("ICO file has no readable images")
+
+    _, _, best = max(entries, key=lambda e: (e[0], e[1]))
+    if best.startswith(_PNG_SIGNATURE):
+        return best
+    if len(best) < 40:
+        raise ValueError("ICO image header is truncated")
+    (bit_count,) = struct.unpack("<H", best[14:16])
+    if bit_count == 32:
+        return _bmp32_to_png(best)
+    if not _sips():
+        raise ValueError(
+            f"This favicon is a {bit_count}-bit ICO, which needs macOS 'sips' to "
+            "convert. Use image_url or image_path with a PNG or JPEG instead."
+        )
+    return _sips_to_png(data, ".ico")
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +682,9 @@ async def set_merchant_logo(
         its largest declared icon, then /apple-touch-icon.png, then
         DuckDuckGo's icon service (low resolution, last resort).
 
+    ICO images (favicons) are always converted to PNG before upload, using
+    the largest size the file contains.
+
     With dry_run=True (the default) nothing is uploaded or changed: the tool
     resolves and validates the image, writes a preview file you can open in
     Quick Look, and reports the merchant's current logo. Call again with
@@ -617,6 +726,10 @@ async def set_merchant_logo(
 
         loaded = await load_source(image_url, image_path, domain)
         data, mime = loaded["data"], loaded["mime"]
+        if mime == "image/x-icon":
+            # Always upload favicons as PNG, padded or not.
+            data = await asyncio.to_thread(ico_to_png, data)
+            mime = "image/png"
         # Measure before padding: circle_safe always yields a 512 canvas, so
         # the padded size says nothing about how sharp the source was.
         src_dims = await asyncio.to_thread(image_dimensions, data, mime)

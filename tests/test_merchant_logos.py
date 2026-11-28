@@ -100,6 +100,29 @@ class TestSetMerchantLogo:
         ops = [c.kwargs["operation"] for c in client.gql_call.await_args_list]
         assert ops == ["Web_GetMerchantDetails"]
 
+    async def test_low_res_warning_uses_source_size_not_padded_size(
+        self, tmp_path, monkeypatch
+    ):
+        # circle_safe upscales to a 512 canvas; a 32px favicon must still warn.
+        monkeypatch.setattr(ml, "PREVIEW_DIR", tmp_path / "previews")
+        img = tmp_path / "tiny.png"
+        img.write_bytes(PNG_64)
+        padded = PNG_64[:16] + (512).to_bytes(4, "big") * 2 + PNG_64[24:]
+        dims = iter([(32, 32), (512, 512)])
+        monkeypatch.setattr(ml, "image_dimensions", lambda data, mime: next(dims))
+        monkeypatch.setattr(ml, "pad_for_circle", lambda data, mime, color: padded)
+        client = AsyncMock()
+        client.gql_call.return_value = MERCHANT
+        with patch.object(ml, "get_monarch_client", AsyncMock(return_value=client)):
+            out = json.loads(
+                await set_merchant_logo(
+                    merchant_id="m1", image_path=str(img), circle_safe=True
+                )
+            )
+        assert out["source_dimensions"] == "32x32"
+        assert out["dimensions"] == "512x512"
+        assert "32x32" in out["warning"]
+
     async def test_live_run_uploads_then_sets_logo(self, tmp_path):
         img = tmp_path / "logo.png"
         img.write_bytes(PNG_64)

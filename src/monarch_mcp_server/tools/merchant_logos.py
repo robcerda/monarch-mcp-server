@@ -327,7 +327,8 @@ async def resolve_from_domain(
         if page.status_code < 400:
             candidates += icon_candidates(page.text[:500_000], str(page.url))
     except httpx.HTTPError as exc:
-        logger.info("set_merchant_logo: homepage fetch failed for %s: %s", host, exc)
+        # repr, not str: a timeout's str() is empty, which hid the cause.
+        logger.info("set_merchant_logo: homepage fetch failed for %s: %r", host, exc)
     candidates += [
         urljoin(home, "/apple-touch-icon.png"),
         f"https://icons.duckduckgo.com/ip3/{host}.ico",
@@ -592,10 +593,15 @@ async def set_merchant_logo(
 
         loaded = await load_source(image_url, image_path, domain)
         data, mime = loaded["data"], loaded["mime"]
+        # Measure before padding: circle_safe always yields a 512 canvas, so
+        # the padded size says nothing about how sharp the source was.
+        src_dims = await asyncio.to_thread(image_dimensions, data, mime)
         if circle_safe:
             data = await asyncio.to_thread(pad_for_circle, data, mime, pad_color)
             mime = "image/png"
-        dims = await asyncio.to_thread(image_dimensions, data, mime)
+            dims = await asyncio.to_thread(image_dimensions, data, mime)
+        else:
+            dims = src_dims
 
         report: Dict[str, Any] = {
             "merchant_id": merchant_id,
@@ -605,13 +611,15 @@ async def set_merchant_logo(
             "sources_tried": loaded["tried"] or None,
             "mime_type": mime,
             "bytes": len(data),
+            "source_dimensions": f"{src_dims[0]}x{src_dims[1]}" if src_dims else None,
             "dimensions": f"{dims[0]}x{dims[1]}" if dims else None,
             "circle_safe": circle_safe,
         }
-        if dims and min(dims) < 128:
+        if src_dims and min(src_dims) < 128:
             report["warning"] = (
-                f"Image is only {dims[0]}x{dims[1]}; it may look soft in Monarch. "
-                "A larger source (apple-touch-icon or a profile picture) is better."
+                f"Source image is only {src_dims[0]}x{src_dims[1]}; it will look "
+                "soft in Monarch. A larger source (apple-touch-icon or a profile "
+                "picture via image_url) is better."
             )
 
         if dry_run:

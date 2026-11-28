@@ -5,6 +5,7 @@ import struct
 import zlib
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from monarch_mcp_server.tools import merchant_logos as ml
@@ -473,3 +474,206 @@ class TestSetMerchantLogoIco:
                 merchant_id="m1", image_path=str(img)))
         assert out["preview_path"].endswith("m1.png")
         assert out["mime_type"] == "image/png"
+
+
+# ---------------------------------------------------------------------------
+# find_merchants_missing_logos: size limits and compact rows
+# ---------------------------------------------------------------------------
+
+
+def _agg(mid, count, logo=None, expense=-1.0, income=0):
+    return {"groupBy": {"merchant": {"id": mid, "name": mid.upper(), "logoUrl": logo}},
+            "summary": {"count": count, "sumExpense": expense, "sumIncome": income}}
+
+
+async def _find(aggs, **kwargs):
+    client = AsyncMock()
+    client.gql_call.return_value = {"byMerchant": aggs}
+    with patch.object(ml, "get_monarch_client", AsyncMock(return_value=client)):
+        return json.loads(await find_merchants_missing_logos(spending_only=False, **kwargs))
+
+
+class TestFindMissingLimits:
+    async def test_limit_truncates_and_reports_totals(self):
+        aggs = [_agg(f"m{i}", 100 - i) for i in range(60)] + [_agg("has", 500, logo="https://l")]
+        out = await _find(aggs)
+        assert out["count"] == 50 and len(out["merchants"]) == 50
+        assert out["total_matching"] == 60
+        assert out["truncated"] is True
+        assert out["merchants"][0]["merchant_id"] == "m0"
+        assert out["merchants_with_logo"] == 1
+        assert out["merchants_without_logo"] == 60
+
+    async def test_min_transactions_applies_before_limit(self):
+        aggs = [_agg("a", 9), _agg("b", 3), _agg("c", 2), _agg("d", 1)]
+        out = await _find(aggs, min_transactions=3, limit=1)
+        assert [m["merchant_id"] for m in out["merchants"]] == ["a"]
+        assert out["total_matching"] == 2
+        assert out["truncated"] is True
+        # The logo counts still cover every merchant, not just the matches.
+        assert out["merchants_without_logo"] == 4
+
+    async def test_not_truncated_when_everything_fits(self):
+        out = await _find([_agg("a", 2), _agg("b", 1)])
+        assert out["total_matching"] == 2 and out["truncated"] is False
+
+    async def test_rows_are_compact(self):
+        out = await _find(
+            [_agg("plain", 5, income=0), _agg("earner", 4, income=12.5),
+             _agg("logo", 3, logo="https://l/x.png")],
+            include_with_logos=True,
+        )
+        rows = {m["merchant_id"]: m for m in out["merchants"]}
+        assert set(rows["plain"]) == {"merchant_id", "name", "transaction_count", "sum_expense"}
+        assert rows["earner"]["sum_income"] == 12.5
+        assert "logo_url" not in rows["earner"]
+        assert rows["logo"]["logo_url"] == "https://l/x.png"
+
+    async def test_large_result_stays_small(self):
+        aggs = [_agg(f"merchant-{i:04d}", 1000 - i) for i in range(660)]
+        out = await _find(aggs)
+        assert len(json.dumps(out)) < 12_000
+
+    @pytest.mark.parametrize("limit", [0, -5])
+    async def test_rejects_non_positive_limit(self, limit):
+        out = await _find([_agg("a", 1)], limit=limit)
+        assert out["error"] and "limit" in out["message"]
+
+
+# ---------------------------------------------------------------------------
+# GIF sources
+# ---------------------------------------------------------------------------
+
+GIF = b"GIF89a" + b"\0" * 32
+
+
+class TestGif:
+    async def test_gif_is_converted_to_png_in_dry_run(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ml, "PREVIEW_DIR", tmp_path / "previews")
+        img = tmp_path / "logo.gif"
+        img.write_bytes(GIF)
+        monkeypatch.setattr(ml, "_sips", lambda: "/usr/bin/sips")
+        converted = []
+        monkeypatch.setattr(
+            ml, "_sips_to_png", lambda data, ext: converted.append(ext) or PNG_64)
+        client = AsyncMock()
+        client.gql_call.return_value = MERCHANT
+        with patch.object(ml, "get_monarch_client", AsyncMock(return_value=client)):
+            out = json.loads(await set_merchant_logo(merchant_id="m1", image_path=str(img)))
+        assert converted == [".gif"]
+        assert out["mime_type"] == "image/png"
+        assert out["dimensions"] == "256x256"
+        assert out["preview_path"].endswith("m1.png")
+
+    async def test_gif_without_sips_is_refused_not_uploaded(self, tmp_path, monkeypatch):
+        img = tmp_path / "logo.gif"
+        img.write_bytes(GIF)
+        monkeypatch.setattr(ml, "_sips", lambda: None)
+        client = AsyncMock()
+        client.gql_call.return_value = MERCHANT
+        upload = AsyncMock()
+        with patch.object(ml, "get_monarch_client", AsyncMock(return_value=client)), \
+             patch.object(ml, "upload_to_cloudinary", upload):
+            out = json.loads(await set_merchant_logo(
+                merchant_id="m1", image_path=str(img), dry_run=False))
+        assert out["error"] and "GIF" in out["message"] and "sips" in out["message"]
+        upload.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Domain resolution diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _client_for(routes):
+    """An httpx client whose responses come from {url: response-or-exception}."""
+    def handler(request):
+        result = routes.get(str(request.url))
+        if result is None:
+            return httpx.Response(404)
+        if isinstance(result, Exception):
+            raise result
+        return result
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True)
+
+
+class TestResolveDiagnostics:
+    async def test_failure_lists_every_url_with_its_reason(self):
+        routes = {
+            "https://shop.example/": httpx.Response(403, text="denied"),
+            "https://shop.example/apple-touch-icon.png": httpx.Response(
+                200, headers={"content-type": "text/html"}, text="<html>"),
+            "https://icons.duckduckgo.com/ip3/shop.example.ico": httpx.Response(
+                200, headers={"content-type": "image/svg+xml"}, content=b"<svg/>"),
+        }
+        async with _client_for(routes) as http:
+            with pytest.raises(ml.IconResolutionError) as exc:
+                await ml.resolve_from_domain(http, "shop.example")
+        err = exc.value
+        assert err.homepage == {"url": "https://shop.example/", "status": 403,
+                                "result": "HTTP 403; no icon links read"}
+        tried = {t["url"]: t for t in err.sources_tried}
+        apple = tried["https://shop.example/apple-touch-icon.png"]
+        assert apple["status"] == 200 and "non-image content type text/html" in apple["result"]
+        ddg = tried["https://icons.duckduckgo.com/ip3/shop.example.ico"]
+        assert "not a PNG, JPEG, GIF, WebP or ICO" in ddg["result"]
+        assert "image/svg+xml" in ddg["result"]
+
+    async def test_status_size_and_network_errors_are_reported(self):
+        home = ('<link rel="icon" href="/big.png" sizes="512x512">'
+                '<link rel="apple-touch-icon" href="/touch.png">')
+        routes = {
+            "https://shop.example/": httpx.Response(200, text=home),
+            "https://shop.example/touch.png": httpx.Response(404),
+            "https://shop.example/big.png": httpx.Response(
+                200, headers={"content-length": str(ml.MAX_IMAGE_BYTES + 1),
+                              "content-type": "image/png"}, content=b"x"),
+            "https://shop.example/apple-touch-icon.png": httpx.ConnectTimeout("slow"),
+            "https://icons.duckduckgo.com/ip3/shop.example.ico": httpx.Response(410),
+        }
+        async with _client_for(routes) as http:
+            with pytest.raises(ml.IconResolutionError) as exc:
+                await ml.resolve_from_domain(http, "shop.example")
+        assert exc.value.homepage["result"] == "HTTP 200; 2 icon links"
+        tried = {t["url"]: t for t in exc.value.sources_tried}
+        assert tried["https://shop.example/touch.png"] == {
+            "url": "https://shop.example/touch.png", "status": 404, "result": "HTTP 404"}
+        assert "larger than 5 MB" in tried["https://shop.example/big.png"]["result"]
+        timeout = tried["https://shop.example/apple-touch-icon.png"]
+        assert timeout["status"] is None and "ConnectTimeout" in timeout["result"]
+        assert tried["https://icons.duckduckgo.com/ip3/shop.example.ico"]["result"] == "HTTP 410"
+
+    async def test_homepage_network_error_is_reported(self):
+        routes = {"https://shop.example/": httpx.ReadTimeout("")}
+        async with _client_for(routes) as http:
+            with pytest.raises(ml.IconResolutionError) as exc:
+                await ml.resolve_from_domain(http, "shop.example")
+        assert exc.value.homepage["status"] is None
+        assert "ReadTimeout" in exc.value.homepage["result"]
+
+    async def test_success_marks_the_used_source(self):
+        routes = {
+            "https://shop.example/": httpx.Response(403),
+            "https://shop.example/apple-touch-icon.png": httpx.Response(
+                200, headers={"content-type": "image/png"}, content=PNG_64),
+        }
+        async with _client_for(routes) as http:
+            data, mime, url, tried = await ml.resolve_from_domain(http, "shop.example")
+        assert mime == "image/png" and url.endswith("/apple-touch-icon.png")
+        assert tried[-1] == {"url": url, "status": 200, "result": "used"}
+
+    async def test_set_merchant_logo_error_payload_carries_diagnostics(self, monkeypatch):
+        routes = {"https://shop.example/": httpx.Response(403)}
+        real_client = httpx.AsyncClient
+        transport = _client_for(routes)._transport
+        monkeypatch.setattr(
+            ml.httpx, "AsyncClient",
+            lambda **kw: real_client(transport=transport, **kw))
+        client = AsyncMock()
+        client.gql_call.return_value = MERCHANT
+        with patch.object(ml, "get_monarch_client", AsyncMock(return_value=client)):
+            out = json.loads(await set_merchant_logo(merchant_id="m1", domain="shop.example"))
+        assert out["error"] is True
+        assert "No usable raster icon found for shop.example" in out["message"]
+        assert out["homepage"]["status"] == 403
+        assert [t["result"] for t in out["sources_tried"]] == ["HTTP 404", "HTTP 404"]

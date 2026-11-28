@@ -319,6 +319,16 @@ def _sips_to_png(data: bytes, ext: str) -> bytes:
         return out.read_bytes()
 
 
+def gif_to_png(data: bytes) -> bytes:
+    """Convert a GIF (first frame) to PNG with sips, or refuse clearly."""
+    if not _sips():
+        raise ValueError(
+            "GIF images are converted to PNG before upload, which needs macOS "
+            "'sips'. Use image_url or image_path with a PNG or JPEG instead."
+        )
+    return _sips_to_png(data, ".gif")
+
+
 def ico_to_png(data: bytes) -> bytes:
     """Convert an ICO to PNG, keeping the largest image in the file.
 
@@ -420,37 +430,107 @@ def _require_https(url: str) -> None:
         raise ValueError("image_url must be an https:// URL")
 
 
+class IconResolutionError(ValueError):
+    """No candidate icon for a domain was usable; carries per-URL reasons."""
+
+    def __init__(
+        self, message: str, homepage: Dict[str, Any], sources_tried: List[Dict[str, Any]]
+    ) -> None:
+        super().__init__(message)
+        self.homepage = homepage
+        self.sources_tried = sources_tried
+
+
+def _network_reason(exc: Exception) -> str:
+    # Name the type: a timeout's str() is empty, which hides the cause.
+    detail = str(exc)
+    return f"request failed: {type(exc).__name__}" + (f" ({detail})" if detail else "")
+
+
+async def _try_candidate(
+    http: httpx.AsyncClient, url: str
+) -> Tuple[Optional[bytes], Optional[str], Dict[str, Any]]:
+    """Fetch one candidate icon. Returns (data, mime, diagnostic entry)."""
+    entry: Dict[str, Any] = {"url": url, "status": None, "result": ""}
+    try:
+        async with http.stream("GET", url) as resp:
+            entry["status"] = resp.status_code
+            if str(resp.url) != url:
+                entry["final_url"] = str(resp.url)
+            if resp.status_code >= 400:
+                entry["result"] = f"HTTP {resp.status_code}"
+                return None, None, entry
+            ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+            if ctype == "text/html":
+                entry["result"] = f"non-image content type {ctype}"
+                return None, None, entry
+            length = resp.headers.get("content-length", "")
+            if length.isdigit() and int(length) > MAX_IMAGE_BYTES:
+                entry["result"] = f"larger than {MAX_IMAGE_BYTES // (1024 * 1024)} MB"
+                return None, None, entry
+            chunks, total = [], 0
+            async for chunk in resp.aiter_bytes():
+                total += len(chunk)
+                if total > MAX_IMAGE_BYTES:
+                    entry["result"] = f"larger than {MAX_IMAGE_BYTES // (1024 * 1024)} MB"
+                    return None, None, entry
+                chunks.append(chunk)
+    except httpx.HTTPError as exc:
+        entry["result"] = _network_reason(exc)
+        return None, None, entry
+    data = b"".join(chunks)
+    mime = sniff_image(data)
+    if not mime:
+        entry["result"] = (
+            "not a PNG, JPEG, GIF, WebP or ICO image"
+            + (f" (content type {ctype})" if ctype else "")
+        )
+        return None, None, entry
+    entry["result"] = "used"
+    return data, mime, entry
+
+
 async def resolve_from_domain(
     http: httpx.AsyncClient, domain: str
-) -> Tuple[bytes, str, str, List[str]]:
-    """Find a usable icon for a domain. Returns (bytes, mime, url, tried)."""
+) -> Tuple[bytes, str, str, List[Dict[str, Any]]]:
+    """Find a usable icon for a domain. Returns (bytes, mime, url, tried).
+
+    Each entry in ``tried`` records the URL, its HTTP status (None when the
+    request itself failed) and the result: "used", or why it was rejected.
+    On failure an IconResolutionError carries the same list plus the
+    homepage fetch, so a caller can see e.g. a site refusing scripted clients.
+    """
     host = re.sub(r"^https?://", "", domain.strip()).split("/")[0]
     if not host or "." not in host:
         raise ValueError(f"'{domain}' does not look like a domain")
     home = f"https://{host}/"
+    homepage: Dict[str, Any] = {"url": home, "status": None, "result": ""}
     candidates: List[str] = []
     try:
         page = await http.get(home)
+        homepage["status"] = page.status_code
         if page.status_code < 400:
-            candidates += icon_candidates(page.text[:500_000], str(page.url))
+            links = icon_candidates(page.text[:500_000], str(page.url))
+            candidates += links
+            homepage["result"] = f"HTTP {page.status_code}; {len(links)} icon links"
+        else:
+            homepage["result"] = f"HTTP {page.status_code}; no icon links read"
     except httpx.HTTPError as exc:
-        # repr, not str: a timeout's str() is empty, which hid the cause.
-        logger.info("set_merchant_logo: homepage fetch failed for %s: %r", host, exc)
+        homepage["result"] = _network_reason(exc)
+    logger.info("set_merchant_logo: homepage %s: %s", home, homepage["result"])
     candidates += [
         urljoin(home, "/apple-touch-icon.png"),
         f"https://icons.duckduckgo.com/ip3/{host}.ico",
     ]
-    tried: List[str] = []
+    tried: List[Dict[str, Any]] = []
     for url in dict.fromkeys(candidates):
-        tried.append(url)
-        try:
-            data = await _fetch(http, url)
-        except (httpx.HTTPError, ValueError):
-            continue
-        mime = sniff_image(data)
-        if mime:
+        data, mime, entry = await _try_candidate(http, url)
+        tried.append(entry)
+        if data is not None and mime:
             return data, mime, url, tried
-    raise ValueError(f"No usable raster icon found for {host}")
+    raise IconResolutionError(
+        f"No usable raster icon found for {host}", homepage, tried
+    )
 
 
 async def load_source(
@@ -559,6 +639,8 @@ async def find_merchants_missing_logos(
     end_date: Optional[str] = None,
     include_with_logos: bool = False,
     spending_only: bool = True,
+    limit: int = 50,
+    min_transactions: int = 1,
 ) -> str:
     """
     List merchants that have no logo, ranked by how many transactions use them.
@@ -579,15 +661,24 @@ async def find_merchants_missing_logos(
         include_with_logos: Also return merchants that already have a logo.
         spending_only: Count only transactions in expense-type categories
             (default True). Set False to include income and transfer merchants.
+        limit: Maximum merchants to return (default 50), most transactions
+            first. Keeps the response under the MCP result size limit.
+        min_transactions: Skip merchants with fewer transactions than this
+            (default 1). Applied before the limit.
 
     Returns:
-        Merchants with id, name, logo_url, transaction_count and totals, plus
-        counts of merchants with and without logos.
+        merchants: compact rows with merchant_id, name, transaction_count and
+        sum_expense; sum_income only when non-zero and logo_url only when set.
+        merchants_with_logo / merchants_without_logo count every merchant in
+        the window. total_matching is how many rows passed min_transactions;
+        truncated says whether the limit cut that list.
 
     Example:
         find_merchants_missing_logos(start_date="2026-01-01")
     """
     try:
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
         filters: Dict[str, Any] = {}
         if start_date:
             filters["startDate"] = start_date
@@ -610,7 +701,9 @@ async def find_merchants_missing_logos(
                         "spending_only": True,
                         "merchants_with_logo": 0,
                         "merchants_without_logo": 0,
+                        "total_matching": 0,
                         "count": 0,
+                        "truncated": False,
                         "merchants": [],
                         "message": "No expense categories found",
                     }
@@ -635,24 +728,33 @@ async def find_merchants_missing_logos(
             without_logo += not has_logo
             if has_logo and not include_with_logos:
                 continue
-            rows.append(
-                {
-                    "merchant_id": merchant["id"],
-                    "name": merchant.get("name"),
-                    "logo_url": merchant.get("logoUrl"),
-                    "transaction_count": summary.get("count"),
-                    "sum_expense": summary.get("sumExpense"),
-                    "sum_income": summary.get("sumIncome"),
-                }
-            )
-        rows.sort(key=lambda r: -(r.get("transaction_count") or 0))
+            count = summary.get("count") or 0
+            if count < min_transactions:
+                continue
+            # Compact rows: 600+ merchants with every field overflowed the
+            # MCP result limit, so omit fields that carry no information.
+            row: Dict[str, Any] = {
+                "merchant_id": merchant["id"],
+                "name": merchant.get("name"),
+                "transaction_count": count,
+                "sum_expense": summary.get("sumExpense"),
+            }
+            if summary.get("sumIncome"):
+                row["sum_income"] = summary["sumIncome"]
+            if merchant.get("logoUrl"):
+                row["logo_url"] = merchant["logoUrl"]
+            rows.append(row)
+        rows.sort(key=lambda r: -r["transaction_count"])
+        shown = rows[:limit]
         return json_success(
             {
                 "spending_only": spending_only,
                 "merchants_with_logo": with_logo,
                 "merchants_without_logo": without_logo,
-                "count": len(rows),
-                "merchants": rows,
+                "total_matching": len(rows),
+                "count": len(shown),
+                "truncated": len(rows) > len(shown),
+                "merchants": shown,
             }
         )
     except Exception as e:
@@ -683,7 +785,10 @@ async def set_merchant_logo(
         DuckDuckGo's icon service (low resolution, last resort).
 
     ICO images (favicons) are always converted to PNG before upload, using
-    the largest size the file contains.
+    the largest size the file contains, since Monarch refuses ICO. GIFs are
+    converted to PNG too (needs macOS sips). If a domain yields nothing
+    usable, the error lists every URL tried with its HTTP status or the
+    reason it was rejected.
 
     With dry_run=True (the default) nothing is uploaded or changed: the tool
     resolves and validates the image, writes a preview file you can open in
@@ -726,9 +831,15 @@ async def set_merchant_logo(
 
         loaded = await load_source(image_url, image_path, domain)
         data, mime = loaded["data"], loaded["mime"]
+        # Monarch's Cloudinary preset rejects ICO outright ("Image file format
+        # ico not allowed", HTTP 400) and GIF is unconfirmed, so both always go
+        # up as PNG, padded or not. Converting here, before the dry-run
+        # return, keeps the preview and reported type identical to the upload.
         if mime == "image/x-icon":
-            # Always upload favicons as PNG, padded or not.
             data = await asyncio.to_thread(ico_to_png, data)
+            mime = "image/png"
+        elif mime == "image/gif":
+            data = await asyncio.to_thread(gif_to_png, data)
             mime = "image/png"
         # Measure before padding: circle_safe always yields a 512 canvas, so
         # the padded size says nothing about how sharp the source was.
@@ -799,5 +910,11 @@ async def set_merchant_logo(
             }
         )
         return json_success(report)
+    except IconResolutionError as e:
+        return json_error(
+            "set_merchant_logo",
+            e,
+            {"homepage": e.homepage, "sources_tried": e.sources_tried},
+        )
     except Exception as e:
         return json_error("set_merchant_logo", e)

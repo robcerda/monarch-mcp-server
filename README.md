@@ -536,7 +536,7 @@ live tool registry and the functions' signatures, so it does not drift.
 | `debug_session_loading` | Diagnose session loading problems | None |
 | `delete_transaction` | Delete a transaction from Monarch Money | `transaction_id` |
 | `delete_transaction_rule` | Delete a transaction rule | `rule_id` |
-| `find_merchants_missing_logos` | List merchants with no logo, ranked by transaction count (spending categories only by default) | `start_date`?, `end_date`?, `include_with_logos`?, `spending_only`? |
+| `find_merchants_missing_logos` | List merchants with no logo, most transactions first (spending only and top 50 by default) | `start_date`?, `end_date`?, `include_with_logos`?, `spending_only`?, `limit`?, `min_transactions`? |
 | `get_account_balance_history` | Get historical balance data for a specific account | `account_id` |
 | `get_account_holdings` | Get investment holdings for a specific account | `account_id` |
 | `get_account_sync_health` | Report the health of each linked institution connection | `stale_after_days`? |

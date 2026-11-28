@@ -225,11 +225,20 @@ def json_success(data: Any) -> str:
     return json.dumps(data, indent=2, default=str)
 
 
-def json_error(tool_name: str, exc: Exception) -> str:
-    """Return a consistent JSON error string and log the failure."""
+def json_error(
+    tool_name: str, exc: Exception, details: Optional[Dict[str, Any]] = None
+) -> str:
+    """Return a consistent JSON error string and log the failure.
+
+    ``details`` adds diagnostic fields to the payload; it cannot replace the
+    ``error``, ``tool`` or ``message`` keys.
+    """
     logger.error(f"Failed in {tool_name}: {exc}")
-    return json.dumps(
-        {"error": True, "tool": tool_name, "message": format_exception(exc)},
-        indent=2,
-        default=str,
-    )
+    payload: Dict[str, Any] = {
+        "error": True,
+        "tool": tool_name,
+        "message": format_exception(exc),
+    }
+    for key, value in (details or {}).items():
+        payload.setdefault(key, value)
+    return json.dumps(payload, indent=2, default=str)

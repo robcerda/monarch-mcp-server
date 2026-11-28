@@ -4,8 +4,9 @@ Monarch's web app sets a custom merchant logo in three steps, mirrored here
 (captured from app.monarch.com, web client v1.0.6593):
 
 1. ``Common_GetCloudinaryUploadInfo`` with ``entityType: "merchant"`` returns
-   an upload URL (``info.path``) plus a signed parameter set: ``timestamp``,
-   ``folder``, ``signature``, ``api_key`` and ``upload_preset``.
+   an upload path (``info.path``, e.g. ``/v1_1/monarch-money/image/upload/``,
+   relative to ``api.cloudinary.com``) plus a signed parameter set:
+   ``timestamp``, ``folder``, ``signature``, ``api_key`` and ``upload_preset``.
 2. The image is POSTed as multipart form data straight to that URL
    (Cloudinary). The JSON response carries the uploaded image's ``public_id``,
    e.g. ``production/merchant_logos/custom/<uuid>/<id>``.
@@ -386,11 +387,34 @@ async def load_source(
         return {"data": data, "mime": mime, "source": url, "tried": tried}
 
 
+CLOUDINARY_API_BASE = "https://api.cloudinary.com"
+
+
+def cloudinary_upload_url(path: Optional[str]) -> str:
+    """Turn Monarch's ``info.path`` into the Cloudinary upload URL.
+
+    Monarch returns a path relative to Cloudinary's API host
+    (``/v1_1/monarch-money/image/upload/``), which is joined to
+    ``api.cloudinary.com``. A full URL is accepted too, but only https on a
+    cloudinary.com host, so the image and signed params cannot be sent
+    anywhere else.
+    """
+    if path and path.startswith("/") and not path.startswith("//"):
+        url = CLOUDINARY_API_BASE + path
+    else:
+        url = path or ""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (
+        host == "cloudinary.com" or host.endswith(".cloudinary.com")
+    ):
+        raise RuntimeError(f"Unexpected upload path from Monarch: {path!r}")
+    return url
+
+
 async def upload_to_cloudinary(info: Dict[str, Any], data: bytes, mime: str) -> str:
     """POST the image to the signed upload URL and return its public_id."""
-    url = info.get("path") or ""
-    if not url.startswith("https://"):
-        raise RuntimeError(f"Unexpected upload path from Monarch: {url!r}")
+    url = cloudinary_upload_url(info.get("path"))
     params = {
         k: str(v)
         for k, v in (info.get("requestParams") or {}).items()

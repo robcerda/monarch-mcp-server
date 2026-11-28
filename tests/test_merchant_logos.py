@@ -224,6 +224,33 @@ class TestUploadToCloudinary:
         assert captured["data"] == {"timestamp": "5", "signature": "s"}
         assert captured["files"]["file"][0] == "logo.png"
 
+    def test_relative_path_resolves_to_cloudinary_api(self):
+        # Monarch's live response (2026-11-28) returns a path, not a URL.
+        assert (
+            ml.cloudinary_upload_url("/v1_1/monarch-money/image/upload/")
+            == "https://api.cloudinary.com/v1_1/monarch-money/image/upload/"
+        )
+        assert (
+            ml.cloudinary_upload_url("https://api.cloudinary.com/v1_1/x/image/upload")
+            == "https://api.cloudinary.com/v1_1/x/image/upload"
+        )
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "",
+            None,
+            "http://api.cloudinary.com/v1_1/x/image/upload",
+            "https://evil.example.com/v1_1/x/image/upload",
+            "https://api.cloudinary.com.evil.example/v1_1/x",
+            "//evil.example.com/upload",
+            "v1_1/x/image/upload",
+        ],
+    )
+    def test_refuses_non_cloudinary_targets(self, path):
+        with pytest.raises(RuntimeError, match="Unexpected upload path"):
+            ml.cloudinary_upload_url(path)
+
 
 class TestFindMissing:
     async def test_filters_and_ranks(self):
